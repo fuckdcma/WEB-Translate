@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="StoryForge — dịch thuật game theo ngữ cảnh cốt truyện." />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>StoryForge — Dịch thuật game theo cốt truyện</title>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✦</span><div><strong>StoryForge</strong><small>Game localization studio</small></div></div>
+      <nav>
+        <a class="active" href="#workspace">⌘ <span>Tổng quan</span></a>
+        <a href="#chapters">▤ <span>Cốt truyện</span></a>
+        <a href="#glossary">◇ <span>Từ điển dự án</span><b>24</b></a>
+        <a href="#review">✓ <span>Kiểm tra lại</span></a>
+      </nav>
+      <div class="sidebar-foot"><div class="avatar">AN</div><div><strong>An Nguyen</strong><small>Project owner</small></div><span>•••</span></div>
+    </aside>
+    <main>
+      <header class="topbar"><div class="crumb">Dự án / <strong>Echoes of Aether</strong></div><button class="icon-btn" aria-label="Thông báo">♧</button></header>
+      <section class="hero" id="workspace"><div><p class="eyebrow">PROJECT WORKSPACE <span class="live-dot"></span> Đang hoạt động</p><h1>Echoes of Aether</h1><p class="lede">Bản địa hóa tiếng Việt theo mạch truyện, giọng nhân vật và thế giới riêng của game.</p></div><button class="primary" id="newChapter">＋ Tạo chương mới</button></section>
+      <section class="stats"><article><span>Tiến độ dịch</span><strong>68%</strong><div class="progress"><i style="width:68%"></i></div><small>1.248 / 1.830 câu thoại</small></article><article><span>Đang chờ kiểm tra</span><strong>32</strong><small class="muted">câu thoại cần đối chiếu</small></article><article><span>Thuật ngữ đã khóa</span><strong>24</strong><small class="muted">tên riêng & cách xưng hô</small></article><article><span>Chất lượng bản dịch</span><strong>94<span class="unit">/100</span></strong><small class="good">↑ 6 điểm tuần này</small></article></section>
+      <section class="grid-main">
+        <article class="panel translation-panel"><div class="panel-head"><div><p class="eyebrow">TRANSLATION QUEUE</p><h2>Câu thoại cần xử lý</h2></div><button class="ghost" id="filterBtn">Tất cả ▾</button></div><div class="queue" id="queue"><div class="queue-item selected"><div class="queue-meta"><span class="tag purple">CHƯƠNG 02</span><span>Scene 14 · 02:18</span></div><p class="source">“The stars remember what we choose to forget.”</p><div class="target-row"><span class="target">“Những vì sao ghi nhớ điều ta chọn lãng quên.”</span><span class="check">✓</span></div><div class="queue-foot"><span>Lyra · <em>trầm tĩnh</em></span><span class="status review-status">Cần kiểm tra</span></div></div><div class="queue-item"><div class="queue-meta"><span class="tag blue">CHƯƠNG 02</span><span>Scene 14 · 02:21</span></div><p class="source">“Then let the silence speak for us.”</p><div class="target-row"><span class="target placeholder">Chưa có bản dịch</span></div><div class="queue-foot"><span>Kael · <em>quyết đoán</em></span><span class="status pending-status">Chưa dịch</span></div></div><div class="queue-item"><div class="queue-meta"><span class="tag orange">CHƯƠNG 01</span><span>Scene 08 · 11:42</span></div><p class="source">“Aether is not a weapon. It is a promise.”</p><div class="target-row"><span class="target">“Aether không phải vũ khí. Đó là một lời hứa.”</span></div><div class="queue-foot"><span>Master Orin · <em>trang trọng</em></span><span class="status approved-status">Đã duyệt</span></div></div></div><button class="load-more">Xem thêm câu thoại <span>→</span></button></article>
+        <div class="right-stack"><article class="panel chapter-panel" id="chapters"><div class="panel-head"><div><p class="eyebrow">STORY STRUCTURE</p><h2>Các chương</h2></div><button class="more">•••</button></div><div class="chapter-list"><div class="chapter"><span class="chapter-icon done">✓</span><div><strong>Chương 01 · The Awakening</strong><small>Đã hoàn thành · 100%</small></div><span class="chapter-count">08/08</span></div><div class="chapter active-chapter"><span class="chapter-icon">02</span><div><strong>Chương 02 · The Remembering</strong><small>Đang dịch · 68%</small></div><span class="chapter-count">14/22</span></div><div class="chapter"><span class="chapter-icon locked">03</span><div><strong>Chương 03 · Ashes of Tomorrow</strong><small>Chưa bắt đầu</small></div><span class="chapter-count">0/18</span></div></div></article><article class="panel glossary-panel" id="glossary"><div class="panel-head"><div><p class="eyebrow">CONSISTENCY LOCK</p><h2>Từ điển dự án</h2></div><button class="ghost">Mở từ điển →</button></div><div class="term"><span class="term-key">Aether</span><span class="arrow">→</span><strong>Aether</strong><small>Tên riêng · giữ nguyên</small></div><div class="term"><span class="term-key">The Veil</span><span class="arrow">→</span><strong>Màn Sương</strong><small>Địa danh · nhất quán</small></div><div class="term"><span class="term-key">Lyra → Kael</span><span class="arrow">→</span><strong>ta → cậu</strong><small>Cách xưng hô · đã khóa</small></div></article></div>
+      </section>
+      <section class="review-banner" id="review"><div class="review-icon">✓</div><div><strong>Mọi bản dịch đều cần một lượt kiểm tra thứ hai</strong><p>Đối chiếu cốt truyện, tên riêng, địa danh và cách xưng hô trước khi xuất bản.</p></div><button class="secondary" id="reviewBtn">Mở hàng đợi kiểm tra →</button></section>
+      <footer><span>StoryForge v0.1 · Saved just now</span><span><i class="live-dot"></i> Autosave on</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast">Đã mở hàng đợi kiểm tra</div>
+  <script src="app.js"></script>
+</body>
+</html>
