@@ -1,5 +1,3 @@
-const model=process.env.GEMINI_MODEL||'gemini-3.6-flash';
-const googleUrl=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 const retryableStatuses=new Set([408,429,500,502,503,504]);
 const maxAttempts=Math.min(4,Math.max(1,Number(process.env.GEMINI_MAX_ATTEMPTS)||4));
 
@@ -23,7 +21,8 @@ function retryDelay(response,attempt){
   return Math.min(60_000,2_000*2**(attempt-1))+Math.round(Math.random()*1_500);
 }
 
-export async function requestGoogle({prompt,temperature=0.1,label='Google AI'}){
+export async function requestGoogle({prompt,temperature=0.1,label='Google AI',model=process.env.GEMINI_MODEL||'gemini-3.6-flash'}){
+  const googleUrl=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   for(let attempt=1;attempt<=maxAttempts;attempt+=1){
     let response;
     try{

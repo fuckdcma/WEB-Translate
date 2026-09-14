@@ -10,10 +10,11 @@ const projectId=process.env.PROJECT_ID;const runId=process.env.RUN_ID;const work
 async function main(){
   try{
     const projects=await readJson('projects.json');const project=projects?.find(item=>item.id===projectId);if(!project)throw new Error(`Project not found: ${projectId}`);
+    const model=(await readJson('config/google-ai.json'))?.model||process.env.GEMINI_MODEL||'gemini-3.6-flash';
     const source=await readText(`projects/${project.id}/${project.fileName}`);if(source===null)throw new Error('Source file not found');
     const sourceHash=createHash('sha256').update(source).digest('hex');const delimiter=/\.csv$/i.test(project.fileName)?',':'\t';const rows=parseDelimited(source,delimiter);const columns=detectColumns(rows);const dataRows=rows.slice(1);const {taskSize,tasks,categories}=buildTaskPlan(dataRows.map(row=>({key:row[columns.key],text:row[columns.source]})));const createdAt=new Date().toISOString();
-    const manifest={version:2,projectId,runId,sourceHash,delimiter,taskSize,workerCount,totalRows:dataRows.length,totalTasks:tasks.length,categories,tasks,createdAt};
-    await uploadWithRetry([jsonFile(`queues/${projectId}/${runId}/manifest.json`,manifest),jsonFile(`status/${projectId}/coordinator.json`,{runId,status:'completed',taskSize,workerCount,totalTasks:tasks.length,totalRows:dataRows.length,categories,completedAt:createdAt})]);
+    const manifest={version:2,projectId,runId,sourceHash,delimiter,taskSize,workerCount,model,totalRows:dataRows.length,totalTasks:tasks.length,categories,tasks,createdAt};
+    await uploadWithRetry([jsonFile(`queues/${projectId}/${runId}/manifest.json`,manifest),jsonFile(`status/${projectId}/coordinator.json`,{runId,status:'completed',taskSize,workerCount,model,totalTasks:tasks.length,totalRows:dataRows.length,categories,completedAt:createdAt})]);
     console.log(`Coordinator created ${tasks.length} tasks of ${taskSize} rows: menu=${categories.menu}, interaction=${categories.interaction}, story=${categories.story}`);
   }catch(error){if(error instanceof StoragePauseError){console.warn(error.message);return}throw error}
 }

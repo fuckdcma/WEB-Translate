@@ -1,6 +1,6 @@
 const $=(selector,root=document)=>root.querySelector(selector);
 const $$=(selector,root=document)=>[...root.querySelectorAll(selector)];
-const titles={overview:'Tổng quan',projects:'Dự án',api:'Tình trạng API',versions:'Quy trình dịch'};
+const titles={overview:'Tổng quan',projects:'Dự án',api:'Tình trạng API',models:'Model Gemini',versions:'Quy trình dịch'};
 const toast=$('#toast');
 let projects=[];
 let runs=[];
@@ -9,11 +9,12 @@ let toastTimer;
 let trackerTimer;
 let trackedProjectId=null;
 let editState=null;
+let modelState={selected:'',models:[]};
 
 function showToast(message,isError=false){clearTimeout(toastTimer);toast.textContent=message;toast.classList.toggle('error',isError);toast.classList.add('show');toastTimer=setTimeout(()=>toast.classList.remove('show'),3200)}
 async function request(url,options){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Yêu cầu thất bại (${response.status})`);return data}
 function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
-function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations()}
+function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations();if(id==='models')loadModels()}
 $$('[data-tab]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
 $$('[data-tab-jump]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tabJump)));
 const startTab=location.hash.slice(1);if(titles[startTab])activateTab(startTab);
@@ -73,6 +74,16 @@ async function deleteProject(projectId,button){const project=projects.find(item=
 async function loadRuns(){const list=$('#runsList');try{const data=await request('/api/github-actions');runs=data.runs||[];const running=runs.filter(x=>x.status==='in_progress').length,queued=runs.filter(x=>x.status==='queued').length;$('#runningCount').textContent=running;$('#queuedCount').textContent=queued;$('#actionCount').textContent=running+queued;list.innerHTML=runs.length?runs.slice(0,4).map(run=>`<div class="timeline-item"><span class="timeline-icon ${run.conclusion==='success'?'success':'process'}">${run.conclusion==='success'?'✓':'↻'}</span><div><strong>${escapeHtml(run.name)}</strong><p>${escapeHtml(run.status)}${run.conclusion?` · ${escapeHtml(run.conclusion)}`:''}</p><small>${new Date(run.createdAt).toLocaleString('vi-VN')}</small></div></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có phiên chạy.</p></div>'}catch(error){$('#actionCount').textContent='—';list.innerHTML=`<div class="empty-state compact-empty"><span>!</span><p>${escapeHtml(error.message)}</p></div>`}}
 async function loadIntegrations(){try{const data=await request('/api/integrations');setIntegration('#hfStatus',data.checks.huggingFace);setIntegration('#githubStatus',data.checks.github);setIntegration('#googleStatus',data.checks.googleAI);$('#hfRepo').textContent=data.dataset||'Chưa cấu hình';$('#githubRepo').textContent=data.repository||'Chưa cấu hình';$('#githubWorkflow').textContent=data.workflow||'translate.yml';$('#googleModel').textContent=data.model||'gemini-3.6-flash'}catch(error){showToast(error.message,true)}}
 function setIntegration(selector,state){const element=$(selector);element.innerHTML=`<i></i>${state.ok?'Đã kết nối':state.configured?'Lỗi kết nối':'Chưa cấu hình'}`;element.classList.toggle('connected',state.ok);element.classList.toggle('failed',state.configured&&!state.ok);if(state.error)element.title=state.error}
+
+function tokenLabel(value){const amount=Number(value)||0;if(!amount)return'Không công bố';if(amount>=1_000_000)return`${Math.round(amount/1_000_000)}M tokens`;if(amount>=1_000)return`${Math.round(amount/1_000)}K tokens`;return`${amount} tokens`}
+function renderModels(){
+  $('#currentModel').textContent=modelState.selected||'Chưa chọn';
+  $('#modelCount').textContent=modelState.models.length;
+  $('#modelList').innerHTML=modelState.models.length?modelState.models.map(model=>{const selected=model.id===modelState.selected;return `<article class="model-row ${selected?'selected':''}"><div class="model-main"><span class="model-logo">G</span><div><strong>${escapeHtml(model.name)}</strong><code>${escapeHtml(model.id)}</code><small>Đầu vào ${tokenLabel(model.inputTokenLimit)} · Đầu ra ${tokenLabel(model.outputTokenLimit)}</small></div></div><div class="model-speed ${escapeHtml(model.tone)}"><div class="speed-gauge" style="--score:${Math.max(20,Math.min(100,Number(model.score)||70))}"><i></i><b></b></div><span>${escapeHtml(model.speed)}</span></div><button class="${selected?'model-selected':'model-select'}" data-model-id="${escapeHtml(model.id)}" ${selected?'disabled':''}>${selected?'✓ Đang dùng':'Chọn'}</button></article>`}).join(''):'<div class="model-empty"><span>!</span><strong>Không tìm thấy model dịch phù hợp</strong><p>Hãy kiểm tra lại kết nối Google AI Studio.</p></div>';
+  $$('[data-model-id]').forEach(button=>button.onclick=()=>chooseModel(button.dataset.modelId,button));
+}
+async function loadModels(){const list=$('#modelList');list.innerHTML='<div class="model-loading"><i></i><strong>Đang lấy danh sách model từ Google...</strong></div>';try{modelState=await request('/api/models');renderModels()}catch(error){list.innerHTML=`<div class="model-empty"><span>!</span><strong>Không thể tải model</strong><p>${escapeHtml(error.message)}</p></div>`;showToast(error.message,true)}}
+async function chooseModel(modelId,button){button.disabled=true;button.textContent='Đang lưu...';try{modelState=await request('/api/models',{method:'PUT',body:JSON.stringify({model:modelId})});renderModels();$('#googleModel').textContent=modelState.selected;showToast(`Đã chọn ${modelState.selected} cho các phiên dịch tiếp theo`)}catch(error){button.disabled=false;button.textContent='Chọn';showToast(error.message,true)}}
 
 const createDialog=$('#createDialog');
 const trackerDialog=$('#trackerDialog');
@@ -150,6 +161,7 @@ $$('.filter').forEach(button=>button.addEventListener('click',()=>{$$('.filter')
 $('#projectSearch').addEventListener('input',renderProjects);
 $('#refreshRuns').addEventListener('click',loadRuns);
 $('#refreshIntegrations').addEventListener('click',loadIntegrations);
+$('#refreshModels').addEventListener('click',loadModels);
 $$('.restore').forEach(button=>button.addEventListener('click',()=>showToast('Khôi phục phiên bản được quản lý bởi GitHub')));
 
 bindDynamicActions();loadProjects();loadRuns();

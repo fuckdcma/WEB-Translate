@@ -14,7 +14,7 @@ function parseGooglePayload(payload){const text=payload?.candidates?.[0]?.conten
 
 async function main(){
   try{
-    const manifest=await readJson(`queues/${projectId}/${runId}/manifest.json`);if(!manifest)throw new Error('Coordinator manifest not found');
+    const manifest=await readJson(`queues/${projectId}/${runId}/manifest.json`);if(!manifest)throw new Error('Coordinator manifest not found');const googleModel=manifest.model||process.env.GEMINI_MODEL||'gemini-3.6-flash';
     const projects=await readJson('projects.json');const project=projects?.find(item=>item.id===projectId);if(!project)throw new Error(`Project not found: ${projectId}`);
     const source=await readText(`projects/${project.id}/${project.fileName}`);if(source===null)throw new Error('Source file not found');
     const sourceHash=createHash('sha256').update(source).digest('hex');if(sourceHash!==manifest.sourceHash)throw new Error('Source file changed after task assignment');
@@ -41,7 +41,7 @@ Return JSON only: an array with exactly one object per input, fields index and t
 ${JSON.stringify(input)}`;
         let translated=null;
         for(let formatAttempt=1;formatAttempt<=2;formatAttempt+=1){
-          try{const response=await requestGoogle({prompt:formatAttempt===1?prompt:`${prompt}\nIMPORTANT: The previous response was incomplete. Return every index exactly once.`,temperature:0.2,label:`Google AI task ${task.id}`});lastRequestAt=Date.now();apiRequests+=response.attempts;const parsed=parseGooglePayload(response.payload);const byIndex=new Map(parsed.map(item=>[Number(item.index),String(item.translation||'')]));if(input.some(item=>!byIndex.get(item.index)))throw new Error('Incomplete task response');translated=byIndex;break}
+          try{const response=await requestGoogle({prompt:formatAttempt===1?prompt:`${prompt}\nIMPORTANT: The previous response was incomplete. Return every index exactly once.`,temperature:0.2,label:`Google AI task ${task.id}`,model:googleModel});lastRequestAt=Date.now();apiRequests+=response.attempts;const parsed=parseGooglePayload(response.payload);const byIndex=new Map(parsed.map(item=>[Number(item.index),String(item.translation||'')]));if(input.some(item=>!byIndex.get(item.index)))throw new Error('Incomplete task response');translated=byIndex;break}
           catch(error){
             if(error instanceof GooglePauseError){const pausedAt=new Date().toISOString();const files=[workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assigned.reduce((sum,item)=>sum+item.rowCount,0),apiRequests,pauseReason:error.reason,message:error.message,pausedAt})];if(error.reason==='daily_quota')files.push(jsonFile(`status/${projectId}/quota.json`,{runId,reason:'daily_quota',message:error.message,pausedAt,workerIndex}));await uploadWithRetry(files);console.warn(error.message);return}
             if(formatAttempt===2){await uploadWithRetry([workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,apiRequests,pauseReason:'invalid_response',message:'Phản hồi dịch chưa đầy đủ. Tác vụ này sẽ được thử lại ở lần chạy tiếp theo.',pausedAt:new Date().toISOString()})]);console.warn(error.message);return}
