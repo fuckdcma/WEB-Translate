@@ -32,25 +32,33 @@ async function buildProjectFile(project){
   const extension=delimiter===','?'csv':'tsv';
   const finalPath=`results/${project.id}/final.${extension}`;
   const saved=await readDatasetText(finalPath);
-  if(saved!==null)return{content:saved,delimiter,finalPath,manual:true};
   const sourceContent=await readDatasetText(`projects/${project.id}/${project.fileName}`);
   if(sourceContent===null)throw new Error('Không tìm thấy tệp nguồn của dự án');
-  const rows=parseDelimited(sourceContent,delimiter);
+  const sourceRows=parseDelimited(sourceContent,delimiter);
+  let rows=saved===null?sourceRows:parseDelimited(saved,delimiter);
+  if(rows.length!==sourceRows.length)rows=sourceRows;
   if(rows.length<2)throw new Error('Tệp nguồn không có dữ liệu');
   const {target,source}=columnsFor(rows);
+  const applyTranslation=(index,value)=>{const row=rows[Number(index)+1];if(row&&String(value||'').trim()&&(saved===null||!String(row[target]||'').trim()))row[target]=String(value)};
 
   const allPaths=await listDatasetFiles();
   const checkpointPaths=allPaths.filter(path=>path.startsWith(`checkpoints/${project.id}/`)&&/\/shard-\d+\.json$/i.test(path));
   for(const path of checkpointPaths){
     const checkpoint=await readDatasetJson(path);
-    for(const item of checkpoint?.translations||[]){const row=rows[Number(item.index)+1];if(row)row[target]=String(item.translation||'')}
+    for(const item of checkpoint?.translations||[])applyTranslation(item.index,item.translation)
   }
 
   const taskCheckpointPaths=allPaths.filter(path=>path.startsWith(`checkpoints/${project.id}/tasks/`)&&/\.json$/i.test(path));
+  const completeTaskIds=new Set(taskCheckpointPaths.map(path=>path.split('/').pop().replace(/\.json$/i,'')));
+  const partialCheckpointPaths=allPaths.filter(path=>path.startsWith(`checkpoints/${project.id}/partial/`)&&/\.json$/i.test(path)&&!completeTaskIds.has(path.split('/').pop().replace(/\.json$/i,'')));
+  for(const path of partialCheckpointPaths){
+    const checkpoint=await readDatasetJson(path);
+    for(const item of checkpoint?.translations||[])applyTranslation(item.index,item.translation)
+  }
   for(const path of taskCheckpointPaths){
     const checkpoint=await readDatasetJson(path);
     if(!checkpoint?.complete)continue;
-    for(const item of checkpoint.translations||[]){const row=rows[Number(item.index)+1];if(row)row[target]=String(item.translation||'')}
+    for(const item of checkpoint.translations||[])applyTranslation(item.index,item.translation)
   }
 
   const resultPaths=allPaths.filter(path=>path.startsWith(`results/${project.id}/`)&&/\/shard-\d+\.tsv$/i.test(path));
@@ -63,11 +71,11 @@ async function buildProjectFile(project){
     const shardColumns=columnsFor(shard);
     for(const resultRow of shard.slice(1)){
       const key=`${String(resultRow[0]||'')}\u0000${String(resultRow[shardColumns.source]||'')}`;const candidates=sourceRowsByKey.get(key)||[];const used=usedByKey.get(key)||0;const rowIndex=candidates[Math.min(used,candidates.length-1)];
-      if(rowIndex!==undefined&&resultRow[shardColumns.target])rows[rowIndex][target]=resultRow[shardColumns.target];
+      if(rowIndex!==undefined&&resultRow[shardColumns.target])applyTranslation(rowIndex-1,resultRow[shardColumns.target]);
       usedByKey.set(key,used+1);
     }
   }
-  return{content:serializeDelimited(rows,delimiter),delimiter,finalPath,manual:false};
+  return{content:serializeDelimited(rows,delimiter),delimiter,finalPath,manual:saved!==null};
 }
 
 export default async function handler(req,res){

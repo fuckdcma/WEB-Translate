@@ -35,19 +35,26 @@ export default async function handler(req,res){
     const currentReview=review?.runId===dispatch?.runId?review:null;
     let manifest=null;
     let completedTaskIds=new Set();
+    let partialRecords=[];
     if(modern){
-      const [loadedManifest,checkpointPaths]=await Promise.all([readDatasetJson(`queues/${projectId}/${currentCoordinator.runId}/manifest.json`),listDatasetFiles(`checkpoints/${projectId}/tasks/`)]);
+      const [loadedManifest,checkpointPaths]=await Promise.all([readDatasetJson(`queues/${projectId}/${currentCoordinator.runId}/manifest.json`),listDatasetFiles(`checkpoints/${projectId}/`)]);
       manifest=loadedManifest;
-      completedTaskIds=new Set(checkpointPaths.map(taskIdFromPath));
+      const completePaths=checkpointPaths.filter(path=>path.includes('/tasks/')&&/\.json$/i.test(path));
+      completedTaskIds=new Set(completePaths.map(taskIdFromPath));
+      const partialPaths=checkpointPaths.filter(path=>path.includes('/partial/')&&/\.json$/i.test(path)&&!completedTaskIds.has(taskIdFromPath(path)));
+      partialRecords=(await Promise.all(partialPaths.map(path=>readDatasetJson(path)))).filter(Boolean);
     }
     const manifestTasks=Array.isArray(manifest?.tasks)?manifest.tasks:[];
+    const taskById=new Map(manifestTasks.map(task=>[task.id,task]));
     const persistedTasks=manifestTasks.filter(task=>completedTaskIds.has(task.id));
     const persistedByWorker=Array.from({length:workers},()=>({completedTasks:0,processedRows:0,totalTasks:0,totalRows:0}));
     for(const task of manifestTasks){const index=workers?task.sequence%workers:0;const bucket=persistedByWorker[index];if(!bucket)continue;bucket.totalTasks+=1;bucket.totalRows+=Number(task.rowCount)||0;if(completedTaskIds.has(task.id)){bucket.completedTasks+=1;bucket.processedRows+=Number(task.rowCount)||0}}
+    let partialRows=0;
+    for(const record of partialRecords){const task=taskById.get(record.taskId);if(!task||record.sourceHash!==manifest?.sourceHash)continue;const translated=new Set((record.translations||[]).filter(item=>String(item.translation||'').trim()).map(item=>Number(item.index)));const count=task.rowIndexes.filter(index=>translated.has(index)).length;partialRows+=count;const index=workers?task.sequence%workers:0;if(persistedByWorker[index])persistedByWorker[index].processedRows+=count}
     const summary={pending:0,running:0,completed:0,paused:0,failed:0};
     for(const worker of activeWorkers){const status=worker?.status||'pending';if(status in summary)summary[status]+=1;else summary.pending+=1}
     let completedTasks=modern?persistedTasks.length:activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.completedTasks)||0),0);
-    let processedRows=modern?persistedTasks.reduce((total,item)=>total+Math.max(0,Number(item.rowCount)||0),0):activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.processedRows)||0),0);
+    let processedRows=modern?persistedTasks.reduce((total,item)=>total+Math.max(0,Number(item.rowCount)||0),partialRows):activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.processedRows)||0),0);
     processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,Number(manual?.translatedRows)||0));
     const totalTasks=modern?manifestTasks.length:Number(currentCoordinator?.totalTasks)||0;
     const translationComplete=modern?totalTasks>0&&completedTasks>=totalTasks:workers>0&&summary.completed===workers;
