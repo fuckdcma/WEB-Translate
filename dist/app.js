@@ -26,7 +26,8 @@ function projectMarkup(project){
   const paused=project.status==='paused';
   const failed=project.status==='failed';
   const label=done?'Hoàn thành':paused?'Đã lưu · Tạm dừng':failed?'Cần kiểm tra':'Đang thực hiện';
-  return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${done?'done':paused?'paused':failed?'failed':'working'}">${progress}% · ${label}</span><div class="project-actions"><button class="track-action" data-track-project="${project.id}">Theo dõi</button><button class="download-action" data-download-project="${project.id}">Tải xuống</button><button class="edit-action" data-edit-project="${project.id}">Chỉnh sửa</button><button class="run-action" data-project-id="${project.id}">${done?'Chạy lại':paused?'Tiếp tục':'Chạy dịch'}</button><button class="delete-action" data-delete-project="${project.id}" aria-label="Xoá ${escapeHtml(project.name)}">Xoá</button></div></article>`;
+  const runControl=paused||failed?'<button class="auto-action" disabled>↻ Tự động tiếp tục</button>':`<button class="run-action" data-project-id="${project.id}">${done?'Chạy lại':'Chạy dịch'}</button>`;
+  return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${done?'done':paused?'paused':failed?'failed':'working'}">${progress}% · ${label}</span><div class="project-actions"><button class="track-action" data-track-project="${project.id}">Theo dõi</button><button class="download-action" data-download-project="${project.id}">Tải xuống</button><button class="edit-action" data-edit-project="${project.id}">Chỉnh sửa</button>${runControl}<button class="delete-action" data-delete-project="${project.id}" aria-label="Xoá ${escapeHtml(project.name)}">Xoá</button></div></article>`;
 }
 function filteredProjects(){const query=$('#projectSearch').value.trim().toLowerCase();return projects.filter(project=>(activeFilter==='all'||activeFilter==='working'&&project.status!=='done'||project.status===activeFilter)&&project.name.toLowerCase().includes(query))}
 function renderProjects(){
@@ -79,6 +80,7 @@ function tokenLabel(value){const amount=Number(value)||0;if(!amount)return'Khôn
 function renderModels(){
   $('#currentModel').textContent=modelState.selected||'Chưa chọn';
   $('#modelCount').textContent=modelState.models.length;
+  const usage=modelState.usage||{};$('#dailyTokens').textContent=Number(usage.totalTokens||0).toLocaleString('vi-VN');$('#dailyTokenLimit').textContent=usage.tokenPerDay?Number(usage.tokenPerDay).toLocaleString('vi-VN'):'Google chưa công bố giới hạn ngày';$('#dailyRequests').textContent=`${Number(usage.requests||0).toLocaleString('vi-VN')}${usage.estimatedRequests?'~':''}`;$('#dailyRequestLimit').textContent=usage.requestsPerDay?Number(usage.requestsPerDay).toLocaleString('vi-VN'):'Google chưa công bố giới hạn ngày';
   $('#modelList').innerHTML=modelState.models.length?modelState.models.map(model=>{const selected=model.id===modelState.selected;return `<article class="model-row ${selected?'selected':''}"><div class="model-main"><span class="model-logo">G</span><div><strong>${escapeHtml(model.name)}</strong><code>${escapeHtml(model.id)}</code><small>Đầu vào ${tokenLabel(model.inputTokenLimit)} · Đầu ra ${tokenLabel(model.outputTokenLimit)}</small></div></div><div class="model-speed ${escapeHtml(model.tone)}"><div class="speed-gauge" style="--score:${Math.max(20,Math.min(100,Number(model.score)||70))}"><i></i><b></b></div><span>${escapeHtml(model.speed)}</span></div><button class="${selected?'model-selected':'model-select'}" data-model-id="${escapeHtml(model.id)}" ${selected?'disabled':''}>${selected?'✓ Đang dùng':'Chọn'}</button></article>`}).join(''):'<div class="model-empty"><span>!</span><strong>Không tìm thấy model dịch phù hợp</strong><p>Hãy kiểm tra lại kết nối Google AI Studio.</p></div>';
   $$('[data-model-id]').forEach(button=>button.onclick=()=>chooseModel(button.dataset.modelId,button));
 }
@@ -130,6 +132,7 @@ function renderTracker(data){
   $('#trackerStage').textContent=data.currentStage;
   $('#trackerPercent').textContent=`${data.progress}%`;
   $('#trackerBar').style.width=`${data.progress}%`;
+  $('#trackerEta').textContent=`Dự kiến: ${data.estimate?.label||'Đang tính'}${data.automation?.nextAttemptAt&&data.state!=='done'?` · tự kiểm tra lại ${new Date(data.automation.nextAttemptAt).toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})}`:''}`;
   $('#trackerUpdated').textContent=`Cập nhật lúc ${new Date(data.updatedAt).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
   $('#trackerSteps').innerHTML=data.steps.map(item=>`<li class="${item.status}"><i>${statusIcon(item.status)}</i><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></span></li>`).join('');
   $('#workerSummary').textContent=data.coordinator&&data.totalTasks?`${Number(data.completedTasks||0)}/${data.totalTasks} tác vụ · ${data.summary.completed}/${data.workers} luồng xong${data.summary.paused?` · ${data.summary.paused} tạm dừng`:''}`:data.workers?`${data.summary.completed}/${data.workers} hoàn tất${data.summary.paused?` · ${data.summary.paused} tạm dừng`:''}`:'Đang chờ';
@@ -140,15 +143,15 @@ function renderTracker(data){
   const index=projects.findIndex(project=>project.id===data.project.id);if(index>=0){projects[index]=data.project;renderProjects()}
   $('#trackerError').classList.toggle('paused',data.state==='paused');
   $('#trackerError').hidden=data.state!=='paused';
-  if(data.state==='paused')$('#trackerError').textContent='Tiến độ đã được lưu. Nhấn “Tiếp tục” sau khi giới hạn Google được làm mới.';
-  if(data.progress===100||data.state==='paused'){clearInterval(trackerTimer);trackerTimer=null}
+  if(data.state==='paused')$('#trackerError').textContent=`${data.project.translatedRows.toLocaleString('vi-VN')}/${data.project.totalRows.toLocaleString('vi-VN')} dòng đã được lưu. Hệ thống sẽ tự tiếp tục; bạn không cần bấm nút.`;
+  if(data.progress===100){clearInterval(trackerTimer);trackerTimer=null}
 }
 async function refreshProjectTracker(){
   if(!trackedProjectId)return;
   try{const data=await request(`/api/project-status?id=${encodeURIComponent(trackedProjectId)}`);renderTracker(data)}catch(error){$('#trackerError').classList.remove('paused');$('#trackerError').hidden=false;$('#trackerError').textContent=error.message}
 }
 function openProjectTracker(projectId){
-  trackedProjectId=projectId;clearInterval(trackerTimer);$('#trackerStage').textContent='Đang tải trạng thái...';$('#trackerPercent').textContent='0%';$('#trackerBar').style.width='0%';$('#trackerSteps').innerHTML='<li class="active"><i>↻</i><span><strong>Đang đồng bộ</strong><small>Vui lòng chờ trong giây lát</small></span></li>';$('#workerGrid').innerHTML='<span class="worker-empty">Đang tải...</span>';$('#trackerError').hidden=true;
+  trackedProjectId=projectId;clearInterval(trackerTimer);$('#trackerStage').textContent='Đang tải trạng thái...';$('#trackerEta').textContent='Đang tính thời gian hoàn thành...';$('#trackerPercent').textContent='0%';$('#trackerBar').style.width='0%';$('#trackerSteps').innerHTML='<li class="active"><i>↻</i><span><strong>Đang đồng bộ</strong><small>Vui lòng chờ trong giây lát</small></span></li>';$('#workerGrid').innerHTML='<span class="worker-empty">Đang tải...</span>';$('#trackerError').hidden=true;
   if(!trackerDialog.open)trackerDialog.showModal();
   refreshProjectTracker();trackerTimer=setInterval(refreshProjectTracker,5000);
 }

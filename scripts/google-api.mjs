@@ -4,16 +4,19 @@ const maxAttempts=Math.min(4,Math.max(1,Number(process.env.GEMINI_MAX_ATTEMPTS)|
 export const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 
 export class GooglePauseError extends Error{
-  constructor(message,{reason='service_busy',attempts=1,status=0}={}){
+  constructor(message,{reason='service_busy',attempts=1,status=0,quota=null}={}){
     super(message);
     this.name='GooglePauseError';
     this.reason=reason;
     this.attempts=attempts;
     this.status=status;
+    this.quota=quota;
   }
 }
 
 function isDailyQuota(detail){return /daily|per[ _-]?day|requests?[ _-]?per[ _-]?day|\brpd\b|GenerateRequestsPerDay/i.test(detail)}
+function quotaInfo(detail){try{const payload=JSON.parse(detail);const entries=(payload?.error?.details||[]).flatMap(item=>item.violations||[]);const result={};for(const item of entries){const text=`${item.quotaMetric||''} ${item.quotaId||''} ${item.description||''}`;const value=Number(item.quotaValue||String(item.description||'').match(/(?:limit|quota)[^\d]*(\d[\d,]*)/i)?.[1]?.replace(/,/g,''));if(!Number.isFinite(value))continue;if(/token.*day|TokensPerDay|\bTPD\b/i.test(text))result.tokenPerDay=value;else if(/request.*day|RequestsPerDay|\bRPD\b/i.test(text))result.requestsPerDay=value;else if(/token.*minute|TokensPerMinute|\bTPM\b/i.test(text))result.tokensPerMinute=value;else if(/request.*minute|RequestsPerMinute|\bRPM\b/i.test(text))result.requestsPerMinute=value}return Object.keys(result).length?result:null}catch{return null}}
+function usageInfo(payload){const usage=payload?.usageMetadata||{};return{inputTokens:Number(usage.promptTokenCount)||0,outputTokens:(Number(usage.candidatesTokenCount)||0)+(Number(usage.thoughtsTokenCount)||0),totalTokens:Number(usage.totalTokenCount)||0,requests:1}}
 
 function retryDelay(response,attempt){
   const retryAfterSeconds=Number(response?.headers?.get('retry-after'));
@@ -35,11 +38,12 @@ export async function requestGoogle({prompt,temperature=0.1,label='Google AI',mo
       continue;
     }
 
-    if(response.ok)return{payload:await response.json(),attempts:attempt};
+    if(response.ok){const payload=await response.json();return{payload,attempts:attempt,usage:usageInfo(payload)}}
     const detail=await response.text();
-    if(response.status===429&&isDailyQuota(detail))throw new GooglePauseError(`${label} đã chạm giới hạn lượt dùng hôm nay. Tiến độ đã được lưu để chạy tiếp sau khi giới hạn được làm mới.`,{reason:'daily_quota',attempts:attempt,status:429});
+    const quota=quotaInfo(detail);
+    if(response.status===429&&isDailyQuota(detail))throw new GooglePauseError(`${label} đã chạm giới hạn lượt dùng hôm nay. Hệ thống sẽ tự chạy tiếp sau khi giới hạn được làm mới.`,{reason:'daily_quota',attempts:attempt,status:429,quota});
     if(!retryableStatuses.has(response.status))throw new Error(`${label} request failed: ${response.status} ${detail}`);
-    if(attempt===maxAttempts)throw new GooglePauseError(`${label} đang bận. Tiến độ đã được lưu để chạy tiếp.`,{reason:response.status===429?'rate_limit':'service_busy',attempts:attempt,status:response.status});
+    if(attempt===maxAttempts)throw new GooglePauseError(`${label} đang bận. Tiến độ đã được lưu để tự chạy tiếp.`,{reason:response.status===429?'rate_limit':'service_busy',attempts:attempt,status:response.status,quota});
     const delay=retryDelay(response,attempt);
     console.warn(`${label}: nhận mã ${response.status}, chờ ${delay}ms trước lần thử ${attempt+1}/${maxAttempts}`);
     await sleep(delay);
