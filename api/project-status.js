@@ -11,11 +11,12 @@ export default async function handler(req,res){
     const project=projects.find(item=>item.id===projectId);
     if(!project)return send(res,404,{error:'Không tìm thấy dự án'});
 
-    const [created,dispatch,review,completedReport]=await Promise.all([
+    const [created,dispatch,review,completedReport,manual]=await Promise.all([
       readProjectStatus(projectId,'project'),
       readProjectStatus(projectId,'dispatch'),
       readProjectStatus(projectId,'review'),
-      readDatasetJson(`results/${projectId}/review.json`)
+      readDatasetJson(`results/${projectId}/review.json`),
+      readProjectStatus(projectId,'manual')
     ]);
     const workers=Math.min(16,Math.max(0,Number(dispatch?.workers)||0));
     const storedShards=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`shard-${index}`))):[];
@@ -29,7 +30,7 @@ export default async function handler(req,res){
       processedRows+=Math.max(0,Number(shard?.processedRows)||0);
     }
     const savedRows=storedShards.reduce((total,shard)=>total+Math.max(0,Number(shard?.processedRows)||0),0);
-    processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,savedRows));
+    processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,savedRows,Number(manual?.translatedRows)||0));
     const translationComplete=workers>0&&summary.completed===workers;
     const translationPercent=Number(project.totalRows)?Math.round(processedRows/Number(project.totalRows)*100):(translationComplete?100:0);
     const reviewState=currentReview?.status||'waiting';
@@ -56,6 +57,6 @@ export default async function handler(req,res){
       step('review','Kiểm tra bản dịch',isComplete?'complete':reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',isComplete?`${Number(effectiveReview.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='paused'?`${Number(currentReview.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
       step('complete','Hoàn tất dự án',isComplete?'complete':hasFailure?'error':hasPause?'paused':'waiting',isComplete?'Có thể tải kết quả':hasPause?pausedMessage:'Đang chờ')
     ];
-    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers:responseWorkers,summary:responseSummary,shards:responseShards,review:effectiveReview,steps,updatedAt:new Date().toISOString()});
+    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers:responseWorkers,summary:responseSummary,shards:responseShards,review:effectiveReview,manual,steps,updatedAt:new Date().toISOString()});
   }catch(error){send(res,500,{error:error.message})}
 }

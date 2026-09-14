@@ -24,6 +24,9 @@ function storageWait(error){
 async function readJson(path){
   try{const response=await downloadFile({repo,path,accessToken});return response?JSON.parse(await response.text()):null}catch(error){if(String(error).includes('404'))return null;throw error}
 }
+async function readText(path){
+  try{const response=await downloadFile({repo,path,accessToken});return response?response.text():null}catch(error){if(String(error).includes('404'))return null;throw error}
+}
 
 async function uploadWithRetry(files){
   let lastError;
@@ -82,6 +85,12 @@ async function main(){
     const stored=await readJson(checkpointPath);
     const usable=stored?.version===1&&stored.sourceHash===sourceHash&&stored.shardCount===shardCount&&stored.shardIndex===shardIndex;
     const translations=new Map((usable?stored.translations:[]).map(item=>[Number(item.index),String(item.translation||'')]));
+    const finalExtension=delimiter===','?'csv':'tsv';
+    const manualContent=await readText(`results/${project.id}/final.${finalExtension}`);
+    if(manualContent){
+      const manualLines=manualContent.trim().split(/\r?\n/);manualLines.shift();
+      manualLines.forEach((line,index)=>{if(index%shardCount!==shardIndex)return;const value=line.split(delimiter)[targetColumn];if(String(value||'').trim())translations.set(index,String(value))});
+    }
     checkpoint={version:1,projectId,sourceHash,shardIndex,shardCount,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
     let apiRequests=Number(usable?stored.apiRequests:0)||0;
     const completedBefore=selected.filter(item=>translations.has(item.index)).length;
