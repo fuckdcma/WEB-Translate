@@ -1,139 +1,54 @@
-import {createHash} from 'node:crypto';
-import {GooglePauseError,requestGoogle,sleep} from './google-api.mjs';
-import {jsonFile,readJson,readText,StoragePauseError,uploadWithRetry} from './hf-pipeline.mjs';
+import {GooglePauseError} from './google-api.mjs';
+import {jsonFile,listPaths,readJson,readText,StoragePauseError,uploadWithRetry} from './hf-pipeline.mjs';
+import {compactBatches,createQuotaRouter} from './quota-control.mjs';
 import {detectColumns,parseDelimited} from './tabular.mjs';
 
-const required=['PROJECT_ID','RUN_ID','WORKER_INDEX','WORKER_COUNT','HF_TOKEN','HF_DATASET_REPO','GEMINI_API_KEY'];
+const required=['PROJECT_ID','RUN_ID','HF_TOKEN','HF_DATASET_REPO','GEMINI_API_KEY'];
 for(const key of required)if(!process.env[key])throw new Error(`Missing required secret or variable: ${key}`);
-const projectId=process.env.PROJECT_ID;
-const runId=process.env.RUN_ID;
-const workerIndex=Number(process.env.WORKER_INDEX);
-const workerCount=Math.min(4,Math.max(1,Number(process.env.WORKER_COUNT)||1));
-const statusPath=`status/${projectId}/worker-${workerIndex}.json`;
-const baseSpacing=Math.max(12_500,Number(process.env.GEMINI_REQUEST_SPACING_MS)||13_000);
-
-const emptyUsage=()=>({inputTokens:0,outputTokens:0,totalTokens:0,requests:0});
-const normalizeUsage=value=>({inputTokens:Number(value?.inputTokens)||0,outputTokens:Number(value?.outputTokens)||0,totalTokens:Number(value?.totalTokens)||0,requests:Number(value?.requests)||0});
-function addUsage(target,value,requestFallback=0){const usage=normalizeUsage(value);target.inputTokens+=usage.inputTokens;target.outputTokens+=usage.outputTokens;target.totalTokens+=usage.totalTokens;target.requests+=usage.requests||requestFallback}
-function workerStatus(status,extra={}){return jsonFile(statusPath,{runId,index:workerIndex,status,updatedAt:new Date().toISOString(),...extra})}
-function taskCheckpoint(task,data){return jsonFile(`checkpoints/${projectId}/tasks/${task.id}.json`,data)}
-function taskPartialCheckpoint(task,data){return jsonFile(`checkpoints/${projectId}/partial/${task.id}.json`,data)}
-function parseGooglePayload(payload){const text=payload?.candidates?.[0]?.content?.parts?.[0]?.text||'[]';const parsed=JSON.parse(text);if(!Array.isArray(parsed))throw new Error('Google AI did not return an array');return parsed}
-function nextBatch(indexes,maxRows,dataRows,columns){const batch=[];let chars=0;for(const index of indexes){const item={index,key:String(dataRows[index]?.[columns.key]||''),text:String(dataRows[index]?.[columns.source]||'')};const size=JSON.stringify(item).length;if(batch.length&&(batch.length>=maxRows||chars+size>60_000))break;batch.push(index);chars+=size}return batch}
+const projectId=process.env.PROJECT_ID;const runId=process.env.RUN_ID;const statusPath=`status/${projectId}/worker-0.json`;
+const workerStatus=(status,extra={})=>jsonFile(statusPath,{runId,index:0,status,updatedAt:new Date().toISOString(),...extra});
+const taskPath=(task,complete)=>`checkpoints/${projectId}/${complete?'tasks':'partial'}/${task.id}.json`;
+const normalizedCategory=value=>/menu/i.test(value)?'menu':/interact/i.test(value)?'interaction':'story';
+function parsedArray(payload){const raw=String(payload?.candidates?.[0]?.content?.parts?.[0]?.text||'');const start=raw.indexOf('[');const end=raw.lastIndexOf(']');if(start<0||end<start)throw new Error('Google AI did not return a translation array');const value=JSON.parse(raw.slice(start,end+1));if(!Array.isArray(value))throw new Error('Google AI translation is not an array');return value}
+async function readMany(paths){const values=[];for(let offset=0;offset<paths.length;offset+=12)values.push(...await Promise.all(paths.slice(offset,offset+12).map(path=>readJson(path))));return values}
 
 async function main(){
   try{
-    const manifest=await readJson(`queues/${projectId}/${runId}/manifest.json`);
-    if(!manifest)throw new Error('Coordinator manifest not found');
-    const googleModel=manifest.model||process.env.GEMINI_MODEL||'gemini-3.6-flash';
-    const projects=await readJson('projects.json');
-    const project=projects?.find(item=>item.id===projectId);
-    if(!project)throw new Error(`Project not found: ${projectId}`);
-    const source=await readText(`projects/${project.id}/${project.fileName}`);
-    if(source===null)throw new Error('Source file not found');
-    const sourceHash=createHash('sha256').update(source).digest('hex');
-    if(sourceHash!==manifest.sourceHash)throw new Error('Source file changed after task assignment');
-    const rows=parseDelimited(source,manifest.delimiter);
-    const columns=detectColumns(rows);
-    const dataRows=rows.slice(1);
-    const assigned=manifest.tasks.filter(task=>task.sequence%workerCount===workerIndex);
-    const assignedRows=assigned.reduce((sum,item)=>sum+item.rowCount,0);
-    const extension=manifest.delimiter===','?'csv':'tsv';
-    const manualContent=await readText(`results/${project.id}/final.${extension}`);
-    const manualRows=manualContent?parseDelimited(manualContent,manifest.delimiter):[];
-    const manualColumns=manualRows.length?detectColumns(manualRows):null;
-    let completedTasks=0;
-    let processedRows=0;
-    let apiRequests=0;
-    let recentContext=[];
-    let lastRequestAt=0;
-    let finalStatusWritten=false;
-    if(workerIndex>0)await sleep(workerIndex*baseSpacing);
+    const manifest=await readJson(`queues/${projectId}/${runId}/manifest.json`);if(!manifest)throw new Error('Coordinator manifest not found');const primaryModel=manifest.model||process.env.GEMINI_MODEL||'gemini-3.6-flash';
+    const projects=await readJson('projects.json');const project=projects?.find(item=>item.id===projectId);if(!project)throw new Error(`Project not found: ${projectId}`);
+    const source=await readText(`projects/${project.id}/${project.fileName}`);if(source===null)throw new Error('Source file not found');const rows=parseDelimited(source,manifest.delimiter);const columns=detectColumns(rows);const dataRows=rows.slice(1);
+    const glossary=await readJson(`glossaries/${projectId}.json`);if(!glossary?.fixed||glossary.sourceHash!==manifest.sourceHash){await uploadWithRetry([workerStatus('paused',{model:primaryModel,processedRows:0,totalRows:dataRows.length,pauseReason:'analysis_incomplete',message:'Đang chờ hoàn tất phân loại và glossary.',pausedAt:new Date().toISOString()})]);return}
+    const config=manifest.googleConfig||await readJson('config/google-ai.json')||{model:primaryModel};const router=await createQuotaRouter({config,primary:primaryModel});const categoryByIndex=new Map((glossary.categories||[]).map(item=>[Number(item.id)-1,normalizedCategory(item.category)]));
+    const checkpointPaths=await listPaths(`checkpoints/${projectId}/`);const translationPaths=checkpointPaths.filter(path=>/\/(tasks|partial)\/[^/]+\.json$/i.test(path)).sort((a,b)=>Number(a.includes('/tasks/'))-Number(b.includes('/tasks/')));const records=await readMany(translationPaths);const translations=new Map();
+    for(const record of records)if(record?.sourceHash===manifest.sourceHash)for(const item of record.translations||[])if(String(item.translation||'').trim())translations.set(Number(item.index),String(item.translation));
+    const extension=manifest.delimiter===','?'csv':'tsv';const manualContent=await readText(`results/${project.id}/final.${extension}`);if(manualContent){const manualRows=parseDelimited(manualContent,manifest.delimiter);const manualColumns=detectColumns(manualRows);manualRows.slice(1).forEach((row,index)=>{if(String(row[manualColumns.target]||'').trim())translations.set(index,String(row[manualColumns.target]))})}
+    const taskByIndex=new Map();for(const task of manifest.tasks)for(const index of task.rowIndexes)taskByIndex.set(index,task);
+    const pending=dataRows.map((row,index)=>({id:index+1,index,text:String(row[columns.source]||''),category:categoryByIndex.get(index)||'story'})).filter(item=>!translations.has(item.index));
+    const queue=[];for(const category of ['menu','interaction','story'])queue.push(...compactBatches(pending.filter(item=>item.category===category),{tokenBudget:router.batchTokenBudget(),maxRows:1_000,serialize:item=>`${item.id}\t${item.text}`}));
+    const progress=()=>({processedRows:translations.size,totalRows:dataRows.length,completedTasks:manifest.tasks.filter(task=>task.rowIndexes.every(index=>translations.has(index))).length,totalTasks:manifest.tasks.length});
+    await uploadWithRetry([workerStatus('running',{model:primaryModel,...progress(),queuedBatches:queue.length,message:'Đang dịch queue theo giới hạn token của model'})]);
+    while(queue.length){
+      const batch=queue.shift();const category=batch[0]?.category||'story';const compact=batch.map(item=>`${item.id}\t${item.text.replace(/[\r\n\t]+/g,' ')}`).join('\n');const joined=batch.map(item=>item.text.toLocaleLowerCase()).join('\n');const relevant=(glossary.terms||[]).filter(term=>term.source&&joined.includes(String(term.source).toLocaleLowerCase())).slice(0,120).map(term=>`${term.source}=${term.target}`).join('; ');
+      const prompt=`Translate this compact ${category.toUpperCase()} batch from ${project.sourceLanguage} to ${project.targetLanguage}. Input is ID<TAB>ENG. Return only the Vietnamese text for each ID. Preserve placeholders, tags, variables, proper names, line breaks represented inside text, and capitalization where meaningful. Follow the fixed glossary exactly when a listed term appears. Keep pronouns and tone consistent for this category.
+Fixed glossary: ${relevant||'(no matching fixed terms)'}
+Return JSON only: [{"id":1,"vi":"..."}]. Return every ID exactly once. No Markdown.
 
-    for(const task of assigned){
-      const completedStored=await readJson(`checkpoints/${projectId}/tasks/${task.id}.json`);
-      const stored=completedStored?.complete?completedStored:await readJson(`checkpoints/${projectId}/partial/${task.id}.json`);
-      const usable=stored?.version===2&&stored.sourceHash===sourceHash&&stored.category===task.category;
-      const translations=new Map((usable?stored.translations:[]).map(item=>[Number(item.index),String(item.translation||'')]));
-      const taskUsage=usable?normalizeUsage(stored.usage):emptyUsage();
-      if(manualColumns)for(const index of task.rowIndexes){const value=manualRows[index+1]?.[manualColumns.target];if(String(value||'').trim())translations.set(index,String(value))}
-      let pending=task.rowIndexes.filter(index=>!String(translations.get(index)||'').trim());
-
-      if(pending.length){
-        const sharedPause=await readJson(`status/${projectId}/quota.json`);
-        if(sharedPause?.runId===runId&&sharedPause?.reason==='daily_quota'){
-          await uploadWithRetry([workerStatus('paused',{model:googleModel,currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assignedRows,apiRequests,pendingUsage:taskUsage,pauseReason:'daily_quota',message:'Một luồng đã phát hiện hết lượt Google hôm nay. Hệ thống sẽ tự chạy tiếp sau khi giới hạn được làm mới.',pausedAt:new Date().toISOString()})]);
-          return;
-        }
-        let maxRows=Math.min(50,pending.length);
-        let smallBatchFailures=0;
-        while(pending.length){
-          const elapsed=Date.now()-lastRequestAt;
-          const requiredGap=baseSpacing*workerCount;
-          if(lastRequestAt&&elapsed<requiredGap)await sleep(requiredGap-elapsed);
-          const batchIndexes=nextBatch(pending,maxRows,dataRows,columns);
-          const input=batchIndexes.map(index=>({index,key:String(dataRows[index]?.[columns.key]||''),text:String(dataRows[index]?.[columns.source]||'')}));
-          const prompt=`You translate one small task in a game localization pipeline. Project: ${project.name}. Category: ${task.category}.
-Translate from ${project.sourceLanguage} to ${project.targetLanguage}. Preserve placeholders, tags, variables, proper names and locations exactly. Keep terminology, pronouns, tone and capitalization consistent within this category. Translate only text; key is context.
-Recent approved context from this worker: ${JSON.stringify(recentContext.slice(-12))}
-Return JSON only: an array with exactly one object per input, fields index and translation. Return every index exactly once. No Markdown.
-
-${JSON.stringify(input)}`;
-          try{
-            const response=await requestGoogle({prompt,temperature:0.2,label:`Google AI task ${task.id}`,model:googleModel});
-            lastRequestAt=Date.now();
-            apiRequests+=response.attempts;
-            addUsage(taskUsage,response.usage,1);
-            const parsed=parseGooglePayload(response.payload);
-            const accepted=new Map(parsed.map(item=>[Number(item.index),String(item.translation||'')]).filter(([index,translation])=>batchIndexes.includes(index)&&translation.trim()));
-            for(const [index,translation] of accepted)translations.set(index,translation);
-            pending=task.rowIndexes.filter(index=>!String(translations.get(index)||'').trim());
-            if(!accepted.size){maxRows=Math.max(5,Math.ceil(maxRows/2));smallBatchFailures+=1}else{maxRows=accepted.size<input.length?Math.max(5,Math.ceil(input.length/2)):50;smallBatchFailures=0}
-          }catch(error){
-            if(error instanceof GooglePauseError){
-              apiRequests+=Number(error.attempts)||1;
-              taskUsage.requests+=Number(error.attempts)||1;
-              const pausedAt=new Date().toISOString();
-              const partial={version:2,projectId,runId,sourceHash,taskId:task.id,category:task.category,model:googleModel,rowIndexes:task.rowIndexes,translations:task.rowIndexes.map(index=>({index,translation:String(translations.get(index)||'')})),complete:false,usage:taskUsage,updatedAt:pausedAt};
-              const files=[taskPartialCheckpoint(task,partial),workerStatus('paused',{model:googleModel,currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assignedRows,apiRequests,pendingUsage:taskUsage,pauseReason:error.reason,message:error.message,pausedAt})];
-              if(error.reason==='daily_quota')files.push(jsonFile(`status/${projectId}/quota.json`,{runId,model:googleModel,reason:'daily_quota',quota:error.quota,message:error.message,pausedAt,workerIndex}));
-              await uploadWithRetry(files);
-              console.warn(error.message);
-              return;
-            }
-            maxRows=Math.max(5,Math.ceil(maxRows/2));
-            smallBatchFailures+=1;
-          }
-          if(smallBatchFailures>=2&&maxRows<=5){
-            const pausedAt=new Date().toISOString();
-            const partial={version:2,projectId,runId,sourceHash,taskId:task.id,category:task.category,model:googleModel,rowIndexes:task.rowIndexes,translations:task.rowIndexes.map(index=>({index,translation:String(translations.get(index)||'')})),complete:false,usage:taskUsage,updatedAt:pausedAt};
-            await uploadWithRetry([taskPartialCheckpoint(task,partial),workerStatus('paused',{model:googleModel,currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assignedRows,apiRequests,pendingUsage:taskUsage,pauseReason:'invalid_response',message:'Tác vụ đã được thu nhỏ tối đa nhưng phản hồi vẫn chưa hợp lệ. Hệ thống sẽ tự thử lại.',pausedAt})]);
-            return;
-          }
-        }
-      }
-
-      const taskTranslations=task.rowIndexes.map(index=>({index,translation:String(translations.get(index)||'')}));
-      if(!taskTranslations.every(item=>item.translation.trim()))throw new Error(`Task ${task.id} is incomplete after translation loop`);
-      completedTasks+=1;
-      processedRows+=task.rowCount;
-      recentContext.push(...task.rowIndexes.slice(-6).map(index=>({source:String(dataRows[index]?.[columns.source]||''),translation:String(translations.get(index)||'')})));
-      recentContext=recentContext.slice(-12);
-      const completedAt=new Date().toISOString();
-      const checkpoint={version:2,projectId,runId,sourceHash,taskId:task.id,category:task.category,model:googleModel,rowIndexes:task.rowIndexes,translations:taskTranslations,complete:true,usage:taskUsage,completedAt};
-      if(!(usable&&stored.complete&&pending.length===0)){
-        const isLast=completedTasks===assigned.length;
-        await uploadWithRetry([taskCheckpoint(task,checkpoint),workerStatus(isLast?'completed':'running',{model:googleModel,currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assignedRows,apiRequests,pendingUsage:emptyUsage(),completedAt:isLast?completedAt:undefined})]);
-        if(isLast)finalStatusWritten=true;
+ID\tENG
+${compact}`;
+      try{
+        const response=await router.generate({prompt,temperature:.15,label:`Google AI ${category} translation`});const parsed=parsedArray(response.payload);const ids=new Set(batch.map(item=>item.id));const accepted=[];
+        for(const item of parsed){const id=Number(item.id);const value=String(item.vi??item.translation??'').trim();if(!ids.has(id)||!value)continue;const index=id-1;translations.set(index,value);accepted.push(index)}
+        if(!accepted.length)throw new Error('Google AI returned no valid translations');
+        const touched=[...new Set(accepted.map(index=>taskByIndex.get(index)).filter(Boolean))];const files=[];const now=new Date().toISOString();for(const task of touched){const taskTranslations=task.rowIndexes.map(index=>({index,translation:String(translations.get(index)||'')}));const complete=taskTranslations.every(item=>item.translation.trim());files.push(jsonFile(taskPath(task,complete),{version:3,projectId,runId,sourceHash:manifest.sourceHash,taskId:task.id,category,model:response.model,rowIndexes:task.rowIndexes,translations:taskTranslations,complete,updatedAt:now,...(complete?{completedAt:now}:{})}))}
+        files.push(...router.files(),workerStatus('running',{model:response.model,...progress(),currentCategory:category,inputTokens:response.inputTokens,queuedBatches:queue.length,message:`Đã lưu ${translations.size}/${dataRows.length} dòng`}));await uploadWithRetry(files);
+        const missing=batch.filter(item=>!translations.has(item.index));if(missing.length)queue.unshift(...compactBatches(missing,{tokenBudget:Math.max(500,Math.floor(router.batchTokenBudget()/2)),maxRows:Math.max(10,Math.floor(batch.length/2)),serialize:item=>`${item.id}\t${item.text}`}));
+      }catch(error){
+        if(error instanceof GooglePauseError&&error.reason==='batch_too_large'&&batch.length>1){const middle=Math.ceil(batch.length/2);queue.unshift(batch.slice(middle),batch.slice(0,middle));continue}
+        const pausedAt=new Date().toISOString();await uploadWithRetry([...router.files(),workerStatus('paused',{model:error.model||primaryModel,...progress(),pauseReason:error.reason||'invalid_response',message:error.message,pausedAt}),...(error.quota?[jsonFile(`status/${projectId}/quota.json`,{runId,model:error.model||primaryModel,reason:error.reason||'rate_limit',quota:error.quota,message:error.message,pausedAt,stage:'translation'})]:[])]);console.warn(error.message);return;
       }
     }
-    if(!finalStatusWritten)await uploadWithRetry([workerStatus('completed',{model:googleModel,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assignedRows,apiRequests,pendingUsage:emptyUsage(),completedAt:new Date().toISOString()})]);
-    console.log(`Worker ${workerIndex} completed ${completedTasks}/${assigned.length} small tasks and saved ${processedRows} rows`);
-  }catch(error){
-    if(error instanceof StoragePauseError){console.warn(error.message);return}
-    try{await uploadWithRetry([workerStatus('failed',{error:error.message,failedAt:new Date().toISOString()})])}catch{}
-    throw error;
-  }
+    const completedAt=new Date().toISOString();await uploadWithRetry([...router.files(),workerStatus('completed',{model:primaryModel,...progress(),completedAt,message:'Đã dịch xong queue và lưu toàn bộ checkpoint'})]);console.log(`Translated and saved ${translations.size}/${dataRows.length} rows`);
+  }catch(error){if(error instanceof StoragePauseError){console.warn(error.message);return}try{await uploadWithRetry([workerStatus('failed',{error:error.message,failedAt:new Date().toISOString()})])}catch{}throw error}
 }
 
 await main();

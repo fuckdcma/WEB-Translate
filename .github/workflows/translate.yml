@@ -1,4 +1,4 @@
-name: Coordinated translation pipeline
+name: Quota-aware localization queue
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       workers:
-        description: Number of parallel workers
+        description: Compatibility input; quota dispatcher uses one request lane
         required: true
-        default: "4"
+        default: "1"
         type: string
       run_id:
         description: Unique tracking run ID
@@ -18,15 +18,12 @@ on:
         type: string
 
 concurrency:
-  group: translate-${{ inputs.project_id }}
-  cancel-in-progress: true
+  group: gemini-localization-queue
+  cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    outputs:
-      shards: ${{ steps.matrix.outputs.shards }}
-      count: ${{ steps.matrix.outputs.count }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -37,36 +34,18 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - id: matrix
-        name: Prepare child worker matrix
-        env:
-          WORKERS: ${{ inputs.workers }}
-        run: |
-          count="$WORKERS"
-          if [ "$count" -lt 1 ]; then count=1; fi
-          if [ "$count" -gt 4 ]; then count=4; fi
-          shards=$(seq 0 $((count - 1)) | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
-          echo "shards=$shards" >> "$GITHUB_OUTPUT"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-      - name: Coordinate and classify small tasks
+      - name: Build compact queue and checkpoint map
         run: node scripts/coordinate-project.mjs
         env:
           PROJECT_ID: ${{ inputs.project_id }}
           RUN_ID: ${{ inputs.run_id }}
-          WORKER_COUNT: ${{ steps.matrix.outputs.count }}
+          WORKER_COUNT: "1"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
 
-  translate:
+  analyze:
     needs: prepare
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        worker: ${{ fromJSON(needs.prepare.outputs.shards) }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -77,23 +56,42 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Translate assigned 10-50 row tasks
+      - name: Classify compact IDs and freeze glossary
+        run: node scripts/analyze-project.mjs
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          RUN_ID: ${{ inputs.run_id }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+  translate:
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Translate compact token-sized batches
         run: node scripts/translate-worker.mjs
         env:
           PROJECT_ID: ${{ inputs.project_id }}
           RUN_ID: ${{ inputs.run_id }}
-          WORKER_INDEX: ${{ matrix.worker }}
-          WORKER_COUNT: ${{ needs.prepare.outputs.count }}
+          WORKER_INDEX: "0"
+          WORKER_COUNT: "1"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_REQUEST_SPACING_MS: ${{ vars.GEMINI_REQUEST_SPACING_MS }}
 
   review:
-    needs: [prepare, translate]
+    needs: translate
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -104,7 +102,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Final review and correction
+      - name: Review compact batches against frozen glossary
         run: node scripts/review-project.mjs
         env:
           PROJECT_ID: ${{ inputs.project_id }}

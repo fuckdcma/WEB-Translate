@@ -1,4 +1,4 @@
-import {downloadFile,uploadFiles} from '@huggingface/hub';
+import {downloadFile,listFiles,uploadFiles} from '@huggingface/hub';
 import {sleep} from './google-api.mjs';
 
 export const repo={type:'dataset',name:process.env.HF_DATASET_REPO};
@@ -15,6 +15,7 @@ function storageWait(error){
 export async function readFile(path){try{return await downloadFile({repo,path,accessToken})}catch(error){if(String(error).includes('404'))return null;throw error}}
 export async function readText(path){const response=await readFile(path);return response?response.text():null}
 export async function readJson(path){const response=await readFile(path);return response?JSON.parse(await response.text()):null}
+export async function listPaths(prefix=''){const paths=[];for await(const entry of listFiles({repo,accessToken,recursive:true}))if(entry.type==='file'&&entry.path.startsWith(prefix))paths.push(entry.path);return paths}
 export const jsonFile=(path,data)=>({path,content:new Blob([JSON.stringify(data,null,2)],{type:'application/json'})});
 export const textFile=(path,content,type='text/tab-separated-values')=>({path,content:new Blob([content],{type})});
 

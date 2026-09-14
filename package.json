@@ -1,10 +1,10 @@
 {
   "name": "storyforge-localization-dashboard",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check app.js && node --check api/projects.js && node --check api/project-file.js && node --check api/integrations.js && node --check api/models.js && node --check api/github-actions.js && node --check api/project-status.js && node --check scripts/google-api.mjs && node --check scripts/tabular.mjs && node --check scripts/task-plan.mjs && node --check scripts/hf-pipeline.mjs && node --check scripts/coordinate-project.mjs && node --check scripts/translate-worker.mjs && node --check scripts/review-project.mjs && node --check scripts/resume-paused.mjs"
+    "check": "node --check app.js && node --check api/projects.js && node --check api/project-file.js && node --check api/integrations.js && node --check api/models.js && node --check api/github-actions.js && node --check api/project-status.js && node --check scripts/google-api.mjs && node --check scripts/quota-control.mjs && node --check scripts/tabular.mjs && node --check scripts/task-plan.mjs && node --check scripts/hf-pipeline.mjs && node --check scripts/coordinate-project.mjs && node --check scripts/analyze-project.mjs && node --check scripts/translate-worker.mjs && node --check scripts/review-project.mjs && node --check scripts/resume-paused.mjs"
   },
   "dependencies": {
     "@huggingface/hub": "^2.17.1"
