@@ -13,19 +13,31 @@ const shardCount=Number(process.env.SHARD_COUNT);
 const checkpointPath=`checkpoints/${projectId}/shard-${shardIndex}.json`;
 const statusPath=`status/${projectId}/shard-${shardIndex}.json`;
 
+class StoragePauseError extends Error{constructor(message){super(message);this.name='StoragePauseError'}}
+
+function storageWait(error){
+  if(Number(error?.statusCode)!==429&&!/rate limit for repository commits/i.test(String(error)))return 0;
+  const minutes=Number(String(error).match(/retry this action in (\d+) minutes?/i)?.[1]);
+  return (Number.isFinite(minutes)&&minutes>0?minutes:2)*60_000+10_000;
+}
+
 async function readJson(path){
   try{const response=await downloadFile({repo,path,accessToken});return response?JSON.parse(await response.text()):null}catch(error){if(String(error).includes('404'))return null;throw error}
 }
 
 async function uploadWithRetry(files){
   let lastError;
-  for(let attempt=1;attempt<=6;attempt+=1)try{
+  for(let attempt=1;attempt<=3;attempt+=1)try{
     await uploadFiles({repo,accessToken,files});
     return;
   }catch(error){
     lastError=error;
-    if(attempt<6)await sleep(500*attempt+shardIndex*120+Math.round(Math.random()*500));
+    const wait=storageWait(error);
+    if(wait&&attempt<3){console.warn(`Hugging Face commit limit reached; waiting ${Math.ceil(wait/60_000)} minutes`);await sleep(wait);continue}
+    if(wait)break;
+    if(attempt<3)await sleep(800*attempt+shardIndex*120+Math.round(Math.random()*500));
   }
+  if(storageWait(lastError))throw new StoragePauseError('Hugging Face đang giới hạn số lần lưu. Phiên sẽ dừng an toàn và có thể tiếp tục sau.')
   throw lastError;
 }
 
@@ -73,9 +85,6 @@ async function main(){
     checkpoint={version:1,projectId,sourceHash,shardIndex,shardCount,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
     let apiRequests=Number(usable?stored.apiRequests:0)||0;
     const completedBefore=selected.filter(item=>translations.has(item.index)).length;
-    const initialProgress=selected.length?Math.round(completedBefore/selected.length*100):100;
-    await persist(checkpoint,'running',{progress:initialProgress,processedRows:completedBefore,totalRows:selected.length,apiRequests,resumed:completedBefore>0,startedAt:new Date().toISOString()});
-
     const sourceText=item=>{
       const columns=item.line.split(delimiter);
       const value=columns[sourceColumn>=0?sourceColumn:Math.min(1,columns.length-1)]||'';
@@ -85,7 +94,8 @@ async function main(){
     const batches=makeBatches(remaining,sourceText);
     await sleep(shardIndex*900);
 
-    for(const batch of batches){
+    for(let batchIndex=0;batchIndex<batches.length;batchIndex+=1){
+      const batch=batches[batchIndex];
       const prompt=`Translate the following game localization strings from ${project.sourceLanguage} to ${project.targetLanguage}.
 Preserve placeholders, markup, proper names and locations exactly. Keep pronouns, terminology and tone consistent across this batch. Translate only the text field; use the key only as context.
 Return JSON only as an array of objects with fields index and translation. Return exactly one object for every supplied index. Do not add Markdown.\n\n${JSON.stringify(batch.map(sourceText))}`;
@@ -114,7 +124,7 @@ Return JSON only as an array of objects with fields index and translation. Retur
       const processedRows=selected.filter(item=>translations.has(item.index)).length;
       const progress=selected.length?Math.round(processedRows/selected.length*100):100;
       checkpoint={...checkpoint,apiRequests,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
-      await persist(checkpoint,'running',{progress,processedRows,totalRows:selected.length,apiRequests,checkpointedAt:checkpoint.updatedAt});
+      if(batchIndex<batches.length-1)await persist(checkpoint,'running',{progress,processedRows,totalRows:selected.length,apiRequests,resumed:completedBefore>0,checkpointedAt:checkpoint.updatedAt});
     }
 
     const output=translatedOutput(header,selected,targetColumn,delimiter,translations);
@@ -126,6 +136,7 @@ Return JSON only as an array of objects with fields index and translation. Retur
     ]);
     console.log(`Translated ${selected.length} rows for shard ${shardIndex}/${shardCount}; ${remaining.length} new rows; ${apiRequests} API attempts total`);
   }catch(error){
+    if(error instanceof StoragePauseError){console.warn(error.message);return}
     try{await writeStatus('failed',{error:error.message,failedAt:new Date().toISOString()})}catch(statusError){console.error('Could not save failed status:',statusError.message)}
     throw error;
   }

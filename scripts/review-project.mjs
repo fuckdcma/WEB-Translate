@@ -12,6 +12,14 @@ const shardCount=Math.min(4,Math.max(1,Number(process.env.SHARD_COUNT)||1));
 const checkpointPath=`checkpoints/${projectId}/review.json`;
 const statusPath=`status/${projectId}/review.json`;
 
+class StoragePauseError extends Error{constructor(message){super(message);this.name='StoragePauseError'}}
+
+function storageWait(error){
+  if(Number(error?.statusCode)!==429&&!/rate limit for repository commits/i.test(String(error)))return 0;
+  const minutes=Number(String(error).match(/retry this action in (\d+) minutes?/i)?.[1]);
+  return (Number.isFinite(minutes)&&minutes>0?minutes:2)*60_000+10_000;
+}
+
 async function readFile(path){
   try{return await downloadFile({repo,path,accessToken})}catch(error){if(String(error).includes('404'))return null;throw error}
 }
@@ -20,7 +28,8 @@ async function readJson(path){const response=await readFile(path);return respons
 
 async function uploadWithRetry(files){
   let lastError;
-  for(let attempt=1;attempt<=6;attempt+=1)try{await uploadFiles({repo,accessToken,files});return}catch(error){lastError=error;if(attempt<6)await sleep(500*attempt+Math.round(Math.random()*500))}
+  for(let attempt=1;attempt<=3;attempt+=1)try{await uploadFiles({repo,accessToken,files});return}catch(error){lastError=error;const wait=storageWait(error);if(wait&&attempt<3){console.warn(`Hugging Face commit limit reached; waiting ${Math.ceil(wait/60_000)} minutes`);await sleep(wait);continue}if(wait)break;if(attempt<3)await sleep(800*attempt+Math.round(Math.random()*500))}
+  if(storageWait(lastError))throw new StoragePauseError('Hugging Face đang giới hạn số lần lưu. Phiên sẽ dừng an toàn và có thể tiếp tục sau.')
   throw lastError;
 }
 
@@ -54,12 +63,11 @@ async function main(){
     let checkedRows=Math.min(rows.length,Number(usable?stored.checkedRows:0)||0);
     let apiRequests=Number(usable?stored.apiRequests:0)||0;
     let checkpoint={version:1,projectId,contentHash,checkedRows,issues,apiRequests,updatedAt:new Date().toISOString()};
-    const initialProgress=rows.length?Math.round(checkedRows/rows.length*100):100;
-    await uploadWithRetry([checkpointFile(checkpoint),statusFile('running',{progress:initialProgress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,resumed:checkedRows>0,startedAt:new Date().toISOString()})]);
 
     const remaining=rows.slice(checkedRows).map((row,index)=>({...row,row:checkedRows+index+1}));
     const batches=makeBatches(remaining,item=>({row:item.row,text:item.text}));
-    for(const batch of batches){
+    for(let batchIndex=0;batchIndex<batches.length;batchIndex+=1){
+      const batch=batches[batchIndex];
       const prompt=`You are the independent reviewer for Vietnamese game localization. Check every supplied line for missing translation, broken placeholders, altered proper names or locations, inconsistent pronouns, and meaning that conflicts with story context. Return JSON only as an object with an issues array. Each issue must contain row, severity (critical, warning, or note), and message in Vietnamese. Return an empty issues array when the batch is good.\n\n${JSON.stringify(batch.map(item=>({row:item.row,text:item.text})))}`;
       let payload;
       try{
@@ -81,7 +89,7 @@ async function main(){
       checkedRows+=batch.length;
       checkpoint={...checkpoint,checkedRows,issues,apiRequests,updatedAt:new Date().toISOString()};
       const progress=rows.length?Math.round(checkedRows/rows.length*100):100;
-      await uploadWithRetry([checkpointFile(checkpoint),statusFile('running',{progress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,checkpointedAt:checkpoint.updatedAt})]);
+      if(batchIndex<batches.length-1)await uploadWithRetry([checkpointFile(checkpoint),statusFile('running',{progress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,resumed:Boolean(usable),checkpointedAt:checkpoint.updatedAt})]);
     }
 
     const completedAt=new Date().toISOString();
@@ -94,6 +102,7 @@ async function main(){
     ]);
     console.log(`Reviewed ${rows.length} rows and found ${issues.length} issues; ${apiRequests} API attempts total`);
   }catch(error){
+    if(error instanceof StoragePauseError){console.warn(error.message);return}
     try{await writeStatus('failed',{error:error.message,failedAt:new Date().toISOString()})}catch(statusError){console.error('Could not save failed review status:',statusError.message)}
     throw error;
   }
