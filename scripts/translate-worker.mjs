@@ -45,7 +45,7 @@ Preserve keys, placeholders, proper names and locations. Keep pronouns and tone 
 Return JSON only as an array of objects with fields index and translation. Do not add Markdown.
 
 ${JSON.stringify(batch.map(item=>({index:item.index,text:item.line.split(delimiter).slice(1).join(delimiter)})))}`;
-      const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature:0.2}})});
+      const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature:0.2}})});
       if(!response.ok)throw new Error(`Google AI request failed: ${response.status} ${await response.text()}`);
       const payload=await response.json();
       const text=payload.candidates?.[0]?.content?.parts?.[0]?.text;
