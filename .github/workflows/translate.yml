@@ -14,13 +14,29 @@ on:
         type: string
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - id: matrix
+        name: Prepare worker matrix
+        env:
+          WORKERS: ${{ inputs.workers }}
+        run: |
+          count="$WORKERS"
+          if [ "$count" -lt 1 ]; then count=1; fi
+          if [ "$count" -gt 16 ]; then count=16; fi
+          shards=$(seq 0 $((count - 1)) | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
   translate:
+    needs: prepare
     strategy:
       fail-fast: false
       max-parallel: 16
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    if: ${{ matrix.shard < fromJSON(inputs.workers) }}
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
