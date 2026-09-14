@@ -1,6 +1,46 @@
-const toast=document.querySelector('#toast');
-function showToast(message){toast.textContent=message;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),2400)}
-document.querySelector('#reviewBtn').addEventListener('click',()=>{document.querySelector('#review').scrollIntoView({behavior:'smooth'});showToast('Đã mở hàng đợi kiểm tra')});
-document.querySelector('#newChapter').addEventListener('click',()=>showToast('Tạo chương mới — sẵn sàng nhập nội dung'));
-document.querySelector('#filterBtn').addEventListener('click',()=>showToast('Bộ lọc: tất cả câu thoại'));
-document.querySelectorAll('.queue-item').forEach(item=>item.addEventListener('click',()=>{document.querySelectorAll('.queue-item').forEach(x=>x.classList.remove('selected'));item.classList.add('selected');showToast('Đã chọn câu thoại')}));
+const $=(selector,root=document)=>root.querySelector(selector);
+const $$=(selector,root=document)=>[...root.querySelectorAll(selector)];
+const titles={overview:'Tổng quan',projects:'Dự án',api:'API kết nối',versions:'Phiên bản'};
+const toast=$('#toast');
+let projects=[];
+let runs=[];
+let activeFilter='all';
+let toastTimer;
+
+function showToast(message,isError=false){clearTimeout(toastTimer);toast.textContent=message;toast.classList.toggle('error',isError);toast.classList.add('show');toastTimer=setTimeout(()=>toast.classList.remove('show'),3200)}
+async function request(url,options){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Yêu cầu thất bại (${response.status})`);return data}
+function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations()}
+$$('[data-tab]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
+$$('[data-tab-jump]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tabJump)));
+const startTab=location.hash.slice(1);if(titles[startTab])activateTab(startTab);
+
+function initials(name){return name.split(/\s+/).slice(0,2).map(word=>word[0]).join('').toUpperCase()||'PR'}
+function projectMarkup(project){const progress=Math.max(0,Math.min(100,Number(project.progress)||0));return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${project.status==='done'?'done':'working'}">${progress}% · ${project.status==='done'?'Hoàn thành':'Đang thực hiện'}</span><button class="run-action" data-project-id="${project.id}">Chạy dịch</button></article>`}
+function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
+function filteredProjects(){const query=$('#projectSearch').value.trim().toLowerCase();return projects.filter(project=>(activeFilter==='all'||project.status===activeFilter)&&project.name.toLowerCase().includes(query))}
+function renderProjects(){const list=$('#projectList');const visible=filteredProjects();$('#allCount').textContent=projects.length;$('#workingCount').textContent=projects.filter(x=>x.status!=='done').length;$('#doneCount').textContent=projects.filter(x=>x.status==='done').length;list.innerHTML=visible.length?visible.map(projectMarkup).join(''):'<div class="panel empty-state"><span>◇</span><strong>Không có dự án phù hợp</strong><p>Tạo dự án mới từ tệp TSV hoặc CSV.</p><button class="primary" data-open-create>Tạo dự án</button></div>';bindDynamicActions();renderOverview()}
+function renderOverview(){const totalRows=projects.reduce((sum,p)=>sum+Number(p.totalRows||0),0);const translated=projects.reduce((sum,p)=>sum+Number(p.translatedRows||0),0);const progress=totalRows?Math.round(translated/totalRows*100):0;$('#overallProgress').textContent=`${progress}%`;$('#overallBar').style.width=`${progress}%`;$('#overallCaption').textContent=projects.length?`${translated.toLocaleString('vi-VN')} / ${totalRows.toLocaleString('vi-VN')} dòng`:'Chưa có dự án';const latest=projects[0];$('#currentProjectEmpty').hidden=Boolean(latest);$('#currentProjectData').hidden=!latest;if(latest){$('#currentProjectName').textContent=latest.name;$('#currentBadge').textContent=latest.status==='done'?'Hoàn thành':'Đang thực hiện';$('#currentBadge').className=`badge ${latest.status==='done'?'done':'working'}`;$('#currentProgress').textContent=`${latest.progress||0}%`;$('#currentRing').style.strokeDasharray=`${latest.progress||0} 100`;$('#currentRows').textContent=`${Number(latest.translatedRows||0).toLocaleString('vi-VN')} / ${Number(latest.totalRows||0).toLocaleString('vi-VN')} dòng`}
+const done=projects.filter(x=>x.status==='done');$('#completedGrid').innerHTML=done.length?done.map(p=>`<div class="completed-card"><div class="project-symbol teal">${initials(p.name)}</div><div><strong>${escapeHtml(p.name)}</strong><p>${Number(p.totalRows||0).toLocaleString('vi-VN')} dòng · ${escapeHtml(p.targetLanguage)}</p></div><span class="score">100</span></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có dự án hoàn thiện.</p></div>'}
+function bindDynamicActions(){$$('[data-open-create]').forEach(button=>button.onclick=()=>$('#createDialog').showModal());$$('.run-action').forEach(button=>button.onclick=()=>runWorkflow(button.dataset.projectId,button))}
+
+async function loadProjects(){try{const data=await request('/api/projects');projects=data.projects||[];renderProjects()}catch(error){projects=[];renderProjects();showToast(error.message,true)}}
+async function loadRuns(){const list=$('#runsList');try{const data=await request('/api/github-actions');runs=data.runs||[];const running=runs.filter(x=>x.status==='in_progress').length,queued=runs.filter(x=>x.status==='queued').length;$('#runningCount').textContent=running;$('#queuedCount').textContent=queued;$('#actionCount').textContent=running+queued;list.innerHTML=runs.length?runs.slice(0,4).map(run=>`<div class="timeline-item"><span class="timeline-icon ${run.conclusion==='success'?'success':'process'}">${run.conclusion==='success'?'✓':'↻'}</span><div><strong>${escapeHtml(run.name)}</strong><p>${escapeHtml(run.status)}${run.conclusion?` · ${escapeHtml(run.conclusion)}`:''}</p><small>${new Date(run.createdAt).toLocaleString('vi-VN')}</small></div></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có phiên chạy.</p></div>'}catch(error){$('#actionCount').textContent='—';list.innerHTML=`<div class="empty-state compact-empty"><span>!</span><p>${escapeHtml(error.message)}</p></div>`}}
+async function loadIntegrations(){try{const data=await request('/api/integrations');setIntegration('#hfStatus',data.checks.huggingFace);setIntegration('#githubStatus',data.checks.github);$('#hfRepo').textContent=data.dataset||'Chưa cấu hình';$('#githubRepo').textContent=data.repository||'Chưa cấu hình';$('#githubWorkflow').textContent=data.workflow||'translate.yml'}catch(error){showToast(error.message,true)}}
+function setIntegration(selector,state){const element=$(selector);element.innerHTML=`<i></i>${state.ok?'Đã kết nối':state.configured?'Lỗi kết nối':'Chưa cấu hình'}`;element.classList.toggle('connected',state.ok);element.classList.toggle('failed',state.configured&&!state.ok);if(state.error)element.title=state.error}
+
+const createDialog=$('#createDialog');
+$$('[data-open-create]').forEach(button=>button.addEventListener('click',()=>createDialog.showModal()));
+$$('[data-close-dialog]').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
+$('#projectFile').addEventListener('change',event=>{$('#projectFileLabel').textContent=event.target.files[0]?.name||'Chọn tệp TSV hoặc CSV'});
+$('#createForm').addEventListener('submit',async event=>{event.preventDefault();const file=$('#projectFile').files[0];if(!file){showToast('Hãy chọn tệp TSV hoặc CSV',true);return}const button=$('#confirmCreate');button.disabled=true;button.textContent='Đang tạo...';try{const content=await file.text();const payload={name:$('#newProjectName').value.trim(),sourceLanguage:$('#sourceLanguage').value,targetLanguage:$('#targetLanguage').value,file:{name:file.name,type:file.type,content}};const data=await request('/api/projects',{method:'POST',body:JSON.stringify(payload)});projects.unshift(data.project);renderProjects();createDialog.close();$('#createForm').reset();$('#projectFileLabel').textContent='Chọn tệp TSV hoặc CSV';showToast('Đã tạo dự án và lưu lên Hugging Face');try{await runWorkflow(data.project.id)}catch{showToast('Dự án đã tạo; GitHub Actions chưa khởi chạy',true)}}catch(error){showToast(error.message,true)}finally{button.disabled=false;button.textContent='Tạo dự án thật'}});
+async function runWorkflow(projectId,button){if(button){button.disabled=true;button.textContent='Đang chạy...'}try{await request('/api/github-actions',{method:'POST',body:JSON.stringify({projectId,workers:Number($('#workerCount')?.value||12)})});showToast('Đã khởi chạy GitHub Actions');await loadRuns()}catch(error){showToast(error.message,true);throw error}finally{if(button){button.disabled=false;button.textContent='Chạy dịch'}}}
+
+$$('.filter').forEach(button=>button.addEventListener('click',()=>{$$('.filter').forEach(x=>x.classList.remove('active'));button.classList.add('active');activeFilter=button.dataset.filter;renderProjects()}));
+$('#projectSearch').addEventListener('input',renderProjects);
+$('#refreshRuns').addEventListener('click',loadRuns);
+$('#refreshIntegrations').addEventListener('click',loadIntegrations);
+$('#createVersion').addEventListener('click',()=>showToast('Phiên bản được tạo khi mã nguồn được triển khai'));
+$$('.restore').forEach(button=>button.addEventListener('click',()=>showToast('Khôi phục phiên bản được quản lý bởi GitHub')));
+
+loadProjects();
+loadRuns();

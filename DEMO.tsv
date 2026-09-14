@@ -1,0 +1,28 @@
+Term	Languages	Vietnamese
+lang/intro_start	PRESS TO START	
+lang/menu_collection	COLLECTION	
+lang/menu_achievements	ACHIEVEMENTS	
+lang/menu_power_up	POWER UP	
+lang/menu_start	START	
+lang/menu_credit	credits	
+lang/menu_screen	screen	
+lang/options_header	Options	
+lang/options_sounds	Sounds	
+lang/options_music	Music	
+lang/options_flashing_VFX	Flashing VFX	
+lang/options_visibleJoystick	Visible joystick	
+lang/options_damageNumbers	Damage Numbers	
+lang/options_ShowGlimmerCarousel	Tech name carousel	
+lang/options_streamersafe	Streamer Safe Music	
+lang/options_resync	Sync Steam Achievements	
+lang/options_successful	Wait about 1 minute	
+lang/options_error	An error occurred	
+lang/pause_quit	QUIT	
+lang/credits_bug_report	Bug reporting and playtesting:	
+lang/open_dlc_page_switch	New content available in the Nintendo eShop 	
+lang/charConfirm_unlockCondition	Unlock condition:	
+achievementLang/{FOSC13_Survive15Luminaire}description	Survive 15 minutes with Luminaire Foscari.	
+secretLang/{Everything}description	All weapons unlocked for Level Up options.	
+arcanaLang/{13}description	Overall Growth, Luck, Greed, and Curse are doubled at fixed intervals. The character starts gaining +1% Growth, Luck, Greed, and Curse every 2 levels.	
+arcanaLang/{9}name	IX - Divine Bloodline	
+arcanaLang/{9}description	Armor also affects listed weapons' damage and reflects enemy damage. Character gains bonus damage depending on missing Health. Defeating enemies with retaliatory damage gives +0.5 Max Health.
