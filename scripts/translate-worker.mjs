@@ -8,13 +8,39 @@ const projectId=process.env.PROJECT_ID;
 const runId=process.env.RUN_ID;
 const shardIndex=Number(process.env.SHARD_INDEX);
 const shardCount=Number(process.env.SHARD_COUNT);
+const googleUrl='https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent';
+const retryableGoogleStatuses=new Set([429,500,502,503,504]);
+const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+
+async function requestGoogle(prompt,temperature){
+  for(let attempt=1;attempt<=8;attempt+=1){
+    let response;
+    try{
+      response=await fetch(googleUrl,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':process.env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature}})});
+    }catch(error){
+      if(attempt===8)throw new Error(`Google AI network request failed after ${attempt} attempts: ${error.message}`);
+      const delay=Math.min(45000,2000*2**(attempt-1))+Math.round(Math.random()*1500);
+      console.warn(`Google AI network retry ${attempt}/8 in ${delay}ms`);
+      await sleep(delay);
+      continue;
+    }
+    if(response.ok)return response.json();
+    const detail=await response.text();
+    if(!retryableGoogleStatuses.has(response.status)||attempt===8)throw new Error(`Google AI request failed: ${response.status} ${detail}`);
+    const retryAfterSeconds=Number(response.headers.get('retry-after'));
+    const delay=Number.isFinite(retryAfterSeconds)&&retryAfterSeconds>0?retryAfterSeconds*1000:Math.min(45000,2000*2**(attempt-1))+Math.round(Math.random()*1500);
+    console.warn(`Google AI returned ${response.status}; retry ${attempt}/8 in ${delay}ms`);
+    await sleep(delay);
+  }
+  throw new Error('Google AI request failed after retries');
+}
 
 async function writeStatus(status,extra={}){
   let lastError;
   for(let attempt=0;attempt<4;attempt+=1)try{
     await uploadFiles({repo,accessToken,files:[{path:`status/${projectId}/shard-${shardIndex}.json`,content:new Blob([JSON.stringify({runId,index:shardIndex,status,updatedAt:new Date().toISOString(),...extra},null,2)],{type:'application/json'})}]});
     return;
-  }catch(error){lastError=error;await new Promise(resolve=>setTimeout(resolve,300*(attempt+1)+shardIndex*80))}
+  }catch(error){lastError=error;await sleep(300*(attempt+1)+shardIndex*80)}
   throw lastError;
 }
 
@@ -38,6 +64,7 @@ async function main(){
     const output=[targetColumn>=0?header:`${header}${delimiter}Vietnamese`];
 
     let lastReportedProgress=0;
+    await sleep(shardIndex*600);
     for(let offset=0;offset<selected.length;offset+=30){
       const batch=selected.slice(offset,offset+30);
       const prompt=`You are translating game localization strings from ${project.sourceLanguage} to ${project.targetLanguage}.
@@ -45,9 +72,7 @@ Preserve keys, placeholders, proper names and locations. Keep pronouns and tone 
 Return JSON only as an array of objects with fields index and translation. Do not add Markdown.
 
 ${JSON.stringify(batch.map(item=>({index:item.index,text:item.line.split(delimiter).slice(1).join(delimiter)})))}`;
-      const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature:0.2}})});
-      if(!response.ok)throw new Error(`Google AI request failed: ${response.status} ${await response.text()}`);
-      const payload=await response.json();
+      const payload=await requestGoogle(prompt,0.2);
       const text=payload.candidates?.[0]?.content?.parts?.[0]?.text;
       const translations=JSON.parse(text||'[]');
       const byIndex=new Map(translations.map(item=>[Number(item.index),String(item.translation||'')]));
