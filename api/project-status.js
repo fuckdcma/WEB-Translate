@@ -11,37 +11,41 @@ export default async function handler(req,res){
     const project=projects.find(item=>item.id===projectId);
     if(!project)return send(res,404,{error:'Không tìm thấy dự án'});
 
-    const [created,dispatch,storedReview]=await Promise.all([
+    const [created,dispatch,review]=await Promise.all([
       readProjectStatus(projectId,'project'),
       readProjectStatus(projectId,'dispatch'),
       readProjectStatus(projectId,'review')
     ]);
     const workers=Math.min(16,Math.max(0,Number(dispatch?.workers)||0));
-    const storedShards=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`shard-${index}`))):[];
-    const shards=storedShards.map(item=>item?.runId===dispatch?.runId?item:null);
-    const review=storedReview?.runId===dispatch?.runId?storedReview:null;
-    const summary={pending:0,running:0,completed:0,failed:0};
+    const shards=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`shard-${index}`))):[];
+    const summary={pending:0,running:0,completed:0,paused:0,failed:0};
+    let processedRows=0;
     for(const shard of shards){
       const state=shard?.status||'pending';
       if(state in summary)summary[state]+=1;else summary.pending+=1;
+      processedRows+=Math.max(0,Number(shard?.processedRows)||0);
     }
+    processedRows=Math.min(Number(project.totalRows)||0,processedRows);
     const translationComplete=workers>0&&summary.completed===workers;
-    const hasTranslationActivity=summary.running+summary.completed+summary.failed>0;
+    const translationPercent=Number(project.totalRows)?Math.round(processedRows/Number(project.totalRows)*100):(translationComplete?100:0);
     const reviewState=review?.status||'waiting';
+    const hasPause=summary.paused>0||reviewState==='paused';
     const hasFailure=summary.failed>0||reviewState==='failed';
     const isComplete=translationComplete&&reviewState==='completed';
-    const translationPercent=workers?Math.round(summary.completed/workers*100):0;
-    const progress=isComplete?100:hasFailure?Math.min(95,20+Math.round(translationPercent*.65)):reviewState==='running'?90:translationComplete?85:dispatch?20+Math.round(translationPercent*.65):created?15:0;
-    const currentStage=isComplete?'Hoàn thành':hasFailure?'Cần kiểm tra':reviewState==='running'?'Đang kiểm tra bản dịch':translationComplete?'Đang chờ kiểm tra':hasTranslationActivity?'Đang dịch song song':dispatch?'Đang chờ phiên xử lý':'Đã khởi tạo';
+    const reviewPercent=Math.max(0,Math.min(100,Number(review?.progress)||0));
+    const progress=isComplete?100:reviewState==='running'||reviewState==='paused'?Math.min(99,85+Math.round(reviewPercent*.14)):dispatch?Math.min(85,20+Math.round(translationPercent*.65)):created?15:0;
+    const state=isComplete?'done':hasFailure?'failed':hasPause?'paused':'working';
+    const currentStage=isComplete?'Hoàn thành':hasFailure?'Cần kiểm tra':hasPause?'Tạm dừng — tiến độ đã được lưu':reviewState==='running'?'Đang kiểm tra bản dịch':translationComplete?'Đang chờ kiểm tra':summary.running+summary.completed>0?'Đang dịch và lưu từng chặng':dispatch?'Đang chờ phiên xử lý':'Đã khởi tạo';
+    const pausedMessage=shards.find(item=>item?.status==='paused')?.message||review?.message||'Có thể chọn Tiếp tục sau khi giới hạn được làm mới.';
     const steps=[
       step('validate','Kiểm tra tệp',created?.fileValidated?'complete':'active',created?.fileValidated?'Định dạng tệp hợp lệ':'Đang kiểm tra'),
       step('store','Lưu dữ liệu',created?.stored?'complete':created?'active':'waiting',created?.stored?'Đã lưu an toàn':'Đang chờ'),
       step('create','Khởi tạo dự án',created?'complete':'waiting',created?'Đã tạo hồ sơ dự án':'Đang chờ'),
-      step('dispatch','Xếp lịch xử lý',dispatch?'complete':'waiting',dispatch?`${workers} phiên đã được xếp lịch`:'Chưa khởi chạy'),
-      step('translate','Dịch song song',hasFailure&&summary.failed?'error':translationComplete?'complete':dispatch?'active':'waiting',workers?`${summary.completed}/${workers} phiên hoàn tất${summary.running?` · ${summary.running} đang chạy`:''}`:'Đang chờ'),
-      step('review','Kiểm tra bản dịch',reviewState==='failed'?'error':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',reviewState==='completed'?`${Number(review.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='running'?`${Number(review.progress||0)}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
-      step('complete','Hoàn tất dự án',isComplete?'complete':hasFailure?'error':'waiting',isComplete?'Có thể tải kết quả':'Đang chờ')
+      step('dispatch','Xếp lịch xử lý',dispatch?'complete':'waiting',dispatch?`${workers} phiên tiết kiệm lượt Google`:'Chưa khởi chạy'),
+      step('translate','Dịch và lưu từng chặng',summary.failed?'error':summary.paused?'paused':translationComplete?'complete':dispatch?'active':'waiting',workers?`${processedRows}/${Number(project.totalRows)||0} dòng đã lưu · ${summary.completed}/${workers} phiên hoàn tất`:'Đang chờ'),
+      step('review','Kiểm tra bản dịch',reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',reviewState==='completed'?`${Number(review.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='paused'?`${Number(review.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
+      step('complete','Hoàn tất dự án',isComplete?'complete':hasFailure?'error':hasPause?'paused':'waiting',isComplete?'Có thể tải kết quả':hasPause?pausedMessage:'Đang chờ')
     ];
-    send(res,200,{project:{...project,progress,status:isComplete?'done':'working',translatedRows:Math.round(Number(project.totalRows||0)*translationPercent/100)},currentStage,progress,workers,summary,shards:shards.map((item,index)=>item||{index,status:'pending'}),review,steps,updatedAt:new Date().toISOString()});
+    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers,summary,shards:shards.map((item,index)=>item||{index,status:'pending'}),review,steps,updatedAt:new Date().toISOString()});
   }catch(error){send(res,500,{error:error.message})}
 }

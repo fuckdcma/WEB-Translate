@@ -1,4 +1,6 @@
-import { downloadFile, uploadFiles } from '@huggingface/hub';
+import {createHash} from 'node:crypto';
+import {downloadFile,uploadFiles} from '@huggingface/hub';
+import {GooglePauseError,makeBatches,requestGoogle,sleep} from './google-api.mjs';
 
 const required=['PROJECT_ID','RUN_ID','SHARD_COUNT','HF_TOKEN','HF_DATASET_REPO','GEMINI_API_KEY'];
 for(const key of required)if(!process.env[key])throw new Error(`Missing required secret or variable: ${key}`);
@@ -6,72 +8,89 @@ const repo={type:'dataset',name:process.env.HF_DATASET_REPO};
 const accessToken=process.env.HF_TOKEN;
 const projectId=process.env.PROJECT_ID;
 const runId=process.env.RUN_ID;
-const shardCount=Math.min(16,Math.max(1,Number(process.env.SHARD_COUNT)||1));
-const googleUrl='https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent';
-const retryableGoogleStatuses=new Set([429,500,502,503,504]);
-const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+const shardCount=Math.min(4,Math.max(1,Number(process.env.SHARD_COUNT)||1));
+const checkpointPath=`checkpoints/${projectId}/review.json`;
+const statusPath=`status/${projectId}/review.json`;
 
-async function requestGoogle(prompt,temperature){
-  for(let attempt=1;attempt<=8;attempt+=1){
-    let response;
-    try{
-      response=await fetch(googleUrl,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':process.env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature}})});
-    }catch(error){
-      if(attempt===8)throw new Error(`Google AI review network request failed after ${attempt} attempts: ${error.message}`);
-      const delay=Math.min(45000,2000*2**(attempt-1))+Math.round(Math.random()*1500);
-      console.warn(`Google AI review network retry ${attempt}/8 in ${delay}ms`);
-      await sleep(delay);
-      continue;
-    }
-    if(response.ok)return response.json();
-    const detail=await response.text();
-    if(!retryableGoogleStatuses.has(response.status)||attempt===8)throw new Error(`Google AI review failed: ${response.status} ${detail}`);
-    const retryAfterSeconds=Number(response.headers.get('retry-after'));
-    const delay=Number.isFinite(retryAfterSeconds)&&retryAfterSeconds>0?retryAfterSeconds*1000:Math.min(45000,2000*2**(attempt-1))+Math.round(Math.random()*1500);
-    console.warn(`Google AI review returned ${response.status}; retry ${attempt}/8 in ${delay}ms`);
-    await sleep(delay);
-  }
-  throw new Error('Google AI review failed after retries');
+async function readFile(path){
+  try{return await downloadFile({repo,path,accessToken})}catch(error){if(String(error).includes('404'))return null;throw error}
 }
 
-async function writeStatus(status,extra={}){
+async function readJson(path){const response=await readFile(path);return response?JSON.parse(await response.text()):null}
+
+async function uploadWithRetry(files){
   let lastError;
-  for(let attempt=0;attempt<4;attempt+=1)try{
-    await uploadFiles({repo,accessToken,files:[{path:`status/${projectId}/review.json`,content:new Blob([JSON.stringify({runId,status,updatedAt:new Date().toISOString(),...extra},null,2)],{type:'application/json'})}]});
-    return;
-  }catch(error){lastError=error;await sleep(300*(attempt+1))}
+  for(let attempt=1;attempt<=6;attempt+=1)try{await uploadFiles({repo,accessToken,files});return}catch(error){lastError=error;if(attempt<6)await sleep(500*attempt+Math.round(Math.random()*500))}
   throw lastError;
 }
 
+function statusFile(status,extra={}){return{path:statusPath,content:new Blob([JSON.stringify({runId,status,updatedAt:new Date().toISOString(),...extra},null,2)],{type:'application/json'})}}
+function checkpointFile(checkpoint){return{path:checkpointPath,content:new Blob([JSON.stringify(checkpoint,null,2)],{type:'application/json'})}}
+async function writeStatus(status,extra={}){await uploadWithRetry([statusFile(status,extra)])}
+
 async function main(){
-  await writeStatus('running',{progress:0,checkedRows:0,startedAt:new Date().toISOString()});
   try{
     const rows=[];
+    const missingShards=[];
     for(let index=0;index<shardCount;index+=1){
-      const response=await downloadFile({repo,path:`results/${projectId}/shard-${index}.tsv`,accessToken});
-      if(!response)throw new Error(`Missing translation result for shard ${index}`);
+      const response=await readFile(`results/${projectId}/shard-${index}.tsv`);
+      if(!response){missingShards.push(index);continue}
       const lines=(await response.text()).trim().split(/\r?\n/);
       lines.shift();
       for(const line of lines)rows.push({shard:index,text:line});
     }
-
-    const issues=[];
-    let lastReportedProgress=0;
-    for(let offset=0;offset<rows.length;offset+=60){
-      const batch=rows.slice(offset,offset+60).map((row,index)=>({row:offset+index+1,text:row.text}));
-      const prompt=`You are the independent reviewer for Vietnamese game localization. Check every supplied line for missing translation, broken placeholders, altered proper names or locations, inconsistent pronouns, and meaning that conflicts with story context. Return JSON only as an object with an issues array. Each issue must contain row, severity (critical, warning, or note), and message in Vietnamese. Return an empty issues array when the batch is good.\n\n${JSON.stringify(batch)}`;
-      const payload=await requestGoogle(prompt,0.1);
-      const result=JSON.parse(payload.candidates?.[0]?.content?.parts?.[0]?.text||'{"issues":[]}');
-      if(Array.isArray(result.issues))issues.push(...result.issues);
-      const checkedRows=Math.min(rows.length,offset+batch.length);
-      const progress=rows.length?Math.round(checkedRows/rows.length*100):100;
-      if(progress>=lastReportedProgress+10&&progress<100){await writeStatus('running',{progress,checkedRows,totalRows:rows.length,issueCount:issues.length});lastReportedProgress=progress}
+    if(missingShards.length){
+      await writeStatus('paused',{progress:0,checkedRows:0,totalRows:rows.length,pauseReason:'translation_incomplete',message:'Đã lưu phần dịch hoàn thành. Chọn Tiếp tục sau khi giới hạn Google được làm mới.',missingShards,pausedAt:new Date().toISOString()});
+      console.warn(`Review paused; waiting for shards: ${missingShards.join(', ')}`);
+      return;
     }
 
-    const report={projectId,checkedRows:rows.length,issueCount:issues.length,issues,completedAt:new Date().toISOString()};
-    await uploadFiles({repo,accessToken,files:[{path:`results/${projectId}/review.json`,content:new Blob([JSON.stringify(report,null,2)],{type:'application/json'})}]});
-    await writeStatus('completed',{progress:100,checkedRows:rows.length,totalRows:rows.length,issueCount:issues.length,completedAt:report.completedAt});
-    console.log(`Reviewed ${rows.length} rows and found ${issues.length} issues`);
+    const contentHash=createHash('sha256').update(rows.map(row=>row.text).join('\n')).digest('hex');
+    const stored=await readJson(checkpointPath);
+    const usable=stored?.version===1&&stored.contentHash===contentHash;
+    const issues=Array.isArray(usable?stored.issues:null)?[...stored.issues]:[];
+    let checkedRows=Math.min(rows.length,Number(usable?stored.checkedRows:0)||0);
+    let apiRequests=Number(usable?stored.apiRequests:0)||0;
+    let checkpoint={version:1,projectId,contentHash,checkedRows,issues,apiRequests,updatedAt:new Date().toISOString()};
+    const initialProgress=rows.length?Math.round(checkedRows/rows.length*100):100;
+    await uploadWithRetry([checkpointFile(checkpoint),statusFile('running',{progress:initialProgress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,resumed:checkedRows>0,startedAt:new Date().toISOString()})]);
+
+    const remaining=rows.slice(checkedRows).map((row,index)=>({...row,row:checkedRows+index+1}));
+    const batches=makeBatches(remaining,item=>({row:item.row,text:item.text}));
+    for(const batch of batches){
+      const prompt=`You are the independent reviewer for Vietnamese game localization. Check every supplied line for missing translation, broken placeholders, altered proper names or locations, inconsistent pronouns, and meaning that conflicts with story context. Return JSON only as an object with an issues array. Each issue must contain row, severity (critical, warning, or note), and message in Vietnamese. Return an empty issues array when the batch is good.\n\n${JSON.stringify(batch.map(item=>({row:item.row,text:item.text})))}`;
+      let payload;
+      try{
+        const response=await requestGoogle({prompt,temperature:0.1,label:'Google AI review'});
+        payload=response.payload;
+        apiRequests+=response.attempts;
+      }catch(error){
+        if(!(error instanceof GooglePauseError))throw error;
+        apiRequests+=Number(error.attempts)||1;
+        checkpoint={...checkpoint,checkedRows,issues,apiRequests,updatedAt:new Date().toISOString()};
+        const progress=rows.length?Math.round(checkedRows/rows.length*100):100;
+        await uploadWithRetry([checkpointFile(checkpoint),statusFile('paused',{progress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,pauseReason:error.reason,message:error.message,pausedAt:new Date().toISOString()})]);
+        console.warn(error.message);
+        return;
+      }
+
+      const result=JSON.parse(payload.candidates?.[0]?.content?.parts?.[0]?.text||'{"issues":[]}');
+      if(Array.isArray(result.issues))issues.push(...result.issues);
+      checkedRows+=batch.length;
+      checkpoint={...checkpoint,checkedRows,issues,apiRequests,updatedAt:new Date().toISOString()};
+      const progress=rows.length?Math.round(checkedRows/rows.length*100):100;
+      await uploadWithRetry([checkpointFile(checkpoint),statusFile('running',{progress,checkedRows,totalRows:rows.length,issueCount:issues.length,apiRequests,checkpointedAt:checkpoint.updatedAt})]);
+    }
+
+    const completedAt=new Date().toISOString();
+    const report={projectId,checkedRows:rows.length,issueCount:issues.length,issues,apiRequests,completedAt};
+    checkpoint={...checkpoint,complete:true,checkedRows:rows.length,issues,apiRequests,updatedAt:completedAt};
+    await uploadWithRetry([
+      {path:`results/${projectId}/review.json`,content:new Blob([JSON.stringify(report,null,2)],{type:'application/json'})},
+      checkpointFile(checkpoint),
+      statusFile('completed',{progress:100,checkedRows:rows.length,totalRows:rows.length,issueCount:issues.length,apiRequests,completedAt})
+    ]);
+    console.log(`Reviewed ${rows.length} rows and found ${issues.length} issues; ${apiRequests} API attempts total`);
   }catch(error){
     try{await writeStatus('failed',{error:error.message,failedAt:new Date().toISOString()})}catch(statusError){console.error('Could not save failed review status:',statusError.message)}
     throw error;

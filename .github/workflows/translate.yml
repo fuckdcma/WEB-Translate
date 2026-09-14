@@ -10,12 +10,16 @@ on:
       workers:
         description: Number of parallel workers
         required: true
-        default: "12"
+        default: "4"
         type: string
       run_id:
         description: Unique tracking run ID
         required: true
         type: string
+
+concurrency:
+  group: translate-${{ inputs.project_id }}
+  cancel-in-progress: true
 
 jobs:
   prepare:
@@ -31,7 +35,7 @@ jobs:
         run: |
           count="$WORKERS"
           if [ "$count" -lt 1 ]; then count=1; fi
-          if [ "$count" -gt 16 ]; then count=16; fi
+          if [ "$count" -gt 4 ]; then count=4; fi
           shards=$(seq 0 $((count - 1)) | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
           echo "count=$count" >> "$GITHUB_OUTPUT"
@@ -40,7 +44,7 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
-      max-parallel: 16
+      max-parallel: 4
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
     runs-on: ubuntu-latest

@@ -21,9 +21,12 @@ function initials(name){return name.split(/\s+/).slice(0,2).map(word=>word[0]).j
 function projectMarkup(project){
   const progress=Math.max(0,Math.min(100,Number(project.progress)||0));
   const done=project.status==='done';
-  return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${done?'done':'working'}">${progress}% · ${done?'Hoàn thành':'Đang thực hiện'}</span><div class="project-actions"><button class="track-action" data-track-project="${project.id}">Theo dõi</button><button class="run-action" data-project-id="${project.id}">${done?'Chạy lại':'Chạy dịch'}</button></div></article>`;
+  const paused=project.status==='paused';
+  const failed=project.status==='failed';
+  const label=done?'Hoàn thành':paused?'Đã lưu · Tạm dừng':failed?'Cần kiểm tra':'Đang thực hiện';
+  return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${done?'done':paused?'paused':failed?'failed':'working'}">${progress}% · ${label}</span><div class="project-actions"><button class="track-action" data-track-project="${project.id}">Theo dõi</button><button class="run-action" data-project-id="${project.id}">${done?'Chạy lại':paused?'Tiếp tục':'Chạy dịch'}</button><button class="delete-action" data-delete-project="${project.id}" aria-label="Xoá ${escapeHtml(project.name)}">Xoá</button></div></article>`;
 }
-function filteredProjects(){const query=$('#projectSearch').value.trim().toLowerCase();return projects.filter(project=>(activeFilter==='all'||project.status===activeFilter)&&project.name.toLowerCase().includes(query))}
+function filteredProjects(){const query=$('#projectSearch').value.trim().toLowerCase();return projects.filter(project=>(activeFilter==='all'||activeFilter==='working'&&project.status!=='done'||project.status===activeFilter)&&project.name.toLowerCase().includes(query))}
 function renderProjects(){
   const list=$('#projectList');
   const visible=filteredProjects();
@@ -46,9 +49,11 @@ function renderOverview(){
   if(latest){$('#currentProjectName').textContent=latest.name;$('#currentBadge').textContent=latest.status==='done'?'Hoàn thành':'Đang thực hiện';$('#currentBadge').className=`badge ${latest.status==='done'?'done':'working'}`;$('#currentProgress').textContent=`${latest.progress||0}%`;$('#currentRing').style.strokeDasharray=`${latest.progress||0} 100`;$('#currentRows').textContent=`${Number(latest.translatedRows||0).toLocaleString('vi-VN')} / ${Number(latest.totalRows||0).toLocaleString('vi-VN')} dòng`}
   const done=projects.filter(x=>x.status==='done');$('#completedGrid').innerHTML=done.length?done.map(p=>`<div class="completed-card"><div class="project-symbol teal">${initials(p.name)}</div><div><strong>${escapeHtml(p.name)}</strong><p>${Number(p.totalRows||0).toLocaleString('vi-VN')} dòng · ${escapeHtml(p.targetLanguage)}</p></div><span class="score">100</span></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có dự án hoàn thiện.</p></div>';
 }
-function bindDynamicActions(){$$('[data-open-create]').forEach(button=>button.onclick=openCreateDialog);$$('.run-action').forEach(button=>button.onclick=()=>runWorkflow(button.dataset.projectId,button));$$('[data-track-project]').forEach(button=>button.onclick=()=>openProjectTracker(button.dataset.trackProject))}
+function bindDynamicActions(){$$('[data-open-create]').forEach(button=>button.onclick=openCreateDialog);$$('.run-action').forEach(button=>button.onclick=()=>runWorkflow(button.dataset.projectId,button));$$('[data-track-project]').forEach(button=>button.onclick=()=>openProjectTracker(button.dataset.trackProject));$$('[data-delete-project]').forEach(button=>button.onclick=()=>deleteProject(button.dataset.deleteProject,button))}
 
-async function loadProjects(){try{const data=await request('/api/projects');projects=data.projects||[];renderProjects();$('#systemUpdated').textContent='Vừa đồng bộ'}catch(error){projects=[];renderProjects();showToast(error.message,true)}}
+async function hydrateProjectProgress(){const snapshot=[...projects];const statuses=await Promise.allSettled(snapshot.map(project=>request(`/api/project-status?id=${encodeURIComponent(project.id)}`)));for(let index=0;index<statuses.length;index+=1){if(statuses[index].status!=='fulfilled')continue;const projectIndex=projects.findIndex(project=>project.id===snapshot[index].id);if(projectIndex>=0)projects[projectIndex]=statuses[index].value.project}renderProjects()}
+async function loadProjects(){try{const data=await request('/api/projects');projects=data.projects||[];renderProjects();$('#systemUpdated').textContent='Đang khôi phục tiến độ';await hydrateProjectProgress();$('#systemUpdated').textContent='Vừa đồng bộ'}catch(error){projects=[];renderProjects();showToast(error.message,true)}}
+async function deleteProject(projectId,button){const project=projects.find(item=>item.id===projectId);if(!project)return;if(!window.confirm(`Xoá dự án "${project.name}"? Tệp nguồn, bản dịch và tiến độ đã lưu cũng sẽ bị xoá.`))return;button.disabled=true;button.textContent='Đang xoá...';try{await request('/api/projects',{method:'DELETE',body:JSON.stringify({id:projectId})});projects=projects.filter(item=>item.id!==projectId);renderProjects();showToast('Đã xoá dự án và dữ liệu đã lưu')}catch(error){showToast(error.message,true);button.disabled=false;button.textContent='Xoá'}}
 async function loadRuns(){const list=$('#runsList');try{const data=await request('/api/github-actions');runs=data.runs||[];const running=runs.filter(x=>x.status==='in_progress').length,queued=runs.filter(x=>x.status==='queued').length;$('#runningCount').textContent=running;$('#queuedCount').textContent=queued;$('#actionCount').textContent=running+queued;list.innerHTML=runs.length?runs.slice(0,4).map(run=>`<div class="timeline-item"><span class="timeline-icon ${run.conclusion==='success'?'success':'process'}">${run.conclusion==='success'?'✓':'↻'}</span><div><strong>${escapeHtml(run.name)}</strong><p>${escapeHtml(run.status)}${run.conclusion?` · ${escapeHtml(run.conclusion)}`:''}</p><small>${new Date(run.createdAt).toLocaleString('vi-VN')}</small></div></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có phiên chạy.</p></div>'}catch(error){$('#actionCount').textContent='—';list.innerHTML=`<div class="empty-state compact-empty"><span>!</span><p>${escapeHtml(error.message)}</p></div>`}}
 async function loadIntegrations(){try{const data=await request('/api/integrations');setIntegration('#hfStatus',data.checks.huggingFace);setIntegration('#githubStatus',data.checks.github);$('#hfRepo').textContent=data.dataset||'Chưa cấu hình';$('#githubRepo').textContent=data.repository||'Chưa cấu hình';$('#githubWorkflow').textContent=data.workflow||'translate.yml'}catch(error){showToast(error.message,true)}}
 function setIntegration(selector,state){const element=$(selector);element.innerHTML=`<i></i>${state.ok?'Đã kết nối':state.configured?'Lỗi kết nối':'Chưa cấu hình'}`;element.classList.toggle('connected',state.ok);element.classList.toggle('failed',state.configured&&!state.ok);if(state.error)element.title=state.error}
@@ -66,7 +71,7 @@ $('#createForm').addEventListener('submit',async event=>{
   const file=$('#projectFile').files[0];
   if(!file){showToast('Hãy chọn tệp TSV hoặc CSV',true);return}
   const button=$('#confirmCreate');
-  const workers=Math.min(16,Math.max(1,Number($('#workerCount').value)||12));
+  const workers=Math.min(4,Math.max(1,Number($('#workerCount').value)||4));
   button.disabled=true;button.textContent='Đang khởi tạo...';$('#cancelCreate').disabled=true;$('#createFields').hidden=true;$('#creationProgress').hidden=false;setCreationStep('validate','active');
   try{
     if(!/\.(tsv|csv)$/i.test(file.name))throw new Error('Chỉ hỗ trợ tệp TSV hoặc CSV');
@@ -87,12 +92,12 @@ $('#createForm').addEventListener('submit',async event=>{
   }finally{button.disabled=false;button.textContent='Tạo dự án thật'}
 });
 
-async function runWorkflow(projectId,button,workers=12,openTracker=true){
+async function runWorkflow(projectId,button,workers=4,openTracker=true){
   if(button){button.disabled=true;button.textContent='Đang chạy...'}
-  try{await request('/api/github-actions',{method:'POST',body:JSON.stringify({projectId,workers})});showToast('Đã xếp lịch xử lý');await loadRuns();if(openTracker)openProjectTracker(projectId)}catch(error){showToast(error.message,true);throw error}finally{if(button){button.disabled=false;button.textContent='Chạy dịch'}}
+  try{const result=await request('/api/github-actions',{method:'POST',body:JSON.stringify({projectId,workers})});showToast(result.message||'Đã xếp lịch xử lý');await loadRuns();if(openTracker)openProjectTracker(projectId)}catch(error){showToast(error.message,true);throw error}finally{if(button){button.disabled=false;const project=projects.find(item=>item.id===projectId);button.textContent=project?.status==='done'?'Chạy lại':project?.status==='paused'?'Tiếp tục':'Chạy dịch'}}
 }
 
-function statusIcon(status){return status==='complete'?'✓':status==='error'?'!':status==='active'?'↻':'·'}
+function statusIcon(status){return status==='complete'?'✓':status==='error'?'!':status==='paused'?'Ⅱ':status==='active'?'↻':'·'}
 function renderTracker(data){
   $('#trackerTitle').textContent=data.project.name;
   $('#trackerStage').textContent=data.currentStage;
@@ -100,18 +105,20 @@ function renderTracker(data){
   $('#trackerBar').style.width=`${data.progress}%`;
   $('#trackerUpdated').textContent=`Cập nhật lúc ${new Date(data.updatedAt).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
   $('#trackerSteps').innerHTML=data.steps.map(item=>`<li class="${item.status}"><i>${statusIcon(item.status)}</i><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></span></li>`).join('');
-  $('#workerSummary').textContent=data.workers?`${data.summary.completed}/${data.workers} hoàn tất`:'Đang chờ';
-  $('#workerGrid').innerHTML=data.shards.length?data.shards.map(item=>`<div class="worker-chip ${item.status}" title="${escapeHtml(item.error||'')}"><i>${item.status==='completed'?'✓':item.status==='failed'?'!':item.status==='running'?'↻':'·'}</i><span>Phiên ${Number(item.index)+1}<small>${item.status==='completed'?'Hoàn tất':item.status==='failed'?'Lỗi':item.status==='running'?`${Number(item.progress||0)}%`:'Chờ'}</small></span></div>`).join(''):'<span class="worker-empty">Chưa có phiên xử lý</span>';
+  $('#workerSummary').textContent=data.workers?`${data.summary.completed}/${data.workers} hoàn tất${data.summary.paused?` · ${data.summary.paused} tạm dừng`:''}`:'Đang chờ';
+  $('#workerGrid').innerHTML=data.shards.length?data.shards.map(item=>`<div class="worker-chip ${item.status}" title="${escapeHtml(item.error||item.message||'')}"><i>${item.status==='completed'?'✓':item.status==='failed'?'!':item.status==='paused'?'Ⅱ':item.status==='running'?'↻':'·'}</i><span>Phiên ${Number(item.index)+1}<small>${item.status==='completed'?'Hoàn tất':item.status==='failed'?'Lỗi':item.status==='paused'?`Đã lưu ${Number(item.progress||0)}%`:item.status==='running'?`${Number(item.progress||0)}%`:'Chờ'}</small></span></div>`).join(''):'<span class="worker-empty">Chưa có phiên xử lý</span>';
   const review=$('#reviewResult');
   review.hidden=!data.review;
   if(data.review)review.innerHTML=`<strong>Kết quả kiểm tra</strong><span>${Number(data.review.checkedRows||0).toLocaleString('vi-VN')} dòng · ${Number(data.review.issueCount||0).toLocaleString('vi-VN')} điểm cần xem lại</span>`;
   const index=projects.findIndex(project=>project.id===data.project.id);if(index>=0){projects[index]=data.project;renderProjects()}
-  $('#trackerError').hidden=true;
-  if(data.progress===100){clearInterval(trackerTimer);trackerTimer=null}
+  $('#trackerError').classList.toggle('paused',data.state==='paused');
+  $('#trackerError').hidden=data.state!=='paused';
+  if(data.state==='paused')$('#trackerError').textContent='Tiến độ đã được lưu. Nhấn “Tiếp tục” sau khi giới hạn Google được làm mới.';
+  if(data.progress===100||data.state==='paused'){clearInterval(trackerTimer);trackerTimer=null}
 }
 async function refreshProjectTracker(){
   if(!trackedProjectId)return;
-  try{const data=await request(`/api/project-status?id=${encodeURIComponent(trackedProjectId)}`);renderTracker(data)}catch(error){$('#trackerError').hidden=false;$('#trackerError').textContent=error.message}
+  try{const data=await request(`/api/project-status?id=${encodeURIComponent(trackedProjectId)}`);renderTracker(data)}catch(error){$('#trackerError').classList.remove('paused');$('#trackerError').hidden=false;$('#trackerError').textContent=error.message}
 }
 function openProjectTracker(projectId){
   trackedProjectId=projectId;clearInterval(trackerTimer);$('#trackerStage').textContent='Đang tải trạng thái...';$('#trackerPercent').textContent='0%';$('#trackerBar').style.width='0%';$('#trackerSteps').innerHTML='<li class="active"><i>↻</i><span><strong>Đang đồng bộ</strong><small>Vui lòng chờ trong giây lát</small></span></li>';$('#workerGrid').innerHTML='<span class="worker-empty">Đang tải...</span>';$('#trackerError').hidden=true;
