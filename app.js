@@ -6,34 +6,120 @@ let projects=[];
 let runs=[];
 let activeFilter='all';
 let toastTimer;
+let trackerTimer;
+let trackedProjectId=null;
 
 function showToast(message,isError=false){clearTimeout(toastTimer);toast.textContent=message;toast.classList.toggle('error',isError);toast.classList.add('show');toastTimer=setTimeout(()=>toast.classList.remove('show'),3200)}
 async function request(url,options){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Yêu cầu thất bại (${response.status})`);return data}
+function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
 function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations()}
 $$('[data-tab]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
 $$('[data-tab-jump]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tabJump)));
 const startTab=location.hash.slice(1);if(titles[startTab])activateTab(startTab);
 
 function initials(name){return name.split(/\s+/).slice(0,2).map(word=>word[0]).join('').toUpperCase()||'PR'}
-function projectMarkup(project){const progress=Math.max(0,Math.min(100,Number(project.progress)||0));return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${project.status==='done'?'done':'working'}">${progress}% · ${project.status==='done'?'Hoàn thành':'Đang thực hiện'}</span><button class="run-action" data-project-id="${project.id}">Chạy dịch</button></article>`}
-function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
+function projectMarkup(project){
+  const progress=Math.max(0,Math.min(100,Number(project.progress)||0));
+  const done=project.status==='done';
+  return `<article class="project-row" data-status="${project.status||'working'}" data-name="${escapeHtml(project.name)}"><div class="project-symbol violet">${initials(project.name)}</div><div class="project-name"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.sourceLanguage)} → ${escapeHtml(project.targetLanguage)} · ${escapeHtml(project.fileName||'')}</span></div><div class="row-progress"><span>${Number(project.translatedRows||0).toLocaleString('vi-VN')} / ${Number(project.totalRows||0).toLocaleString('vi-VN')} dòng</span><div><i style="width:${progress}%"></i></div></div><span class="badge ${done?'done':'working'}">${progress}% · ${done?'Hoàn thành':'Đang thực hiện'}</span><div class="project-actions"><button class="track-action" data-track-project="${project.id}">Theo dõi</button><button class="run-action" data-project-id="${project.id}">${done?'Chạy lại':'Chạy dịch'}</button></div></article>`;
+}
 function filteredProjects(){const query=$('#projectSearch').value.trim().toLowerCase();return projects.filter(project=>(activeFilter==='all'||project.status===activeFilter)&&project.name.toLowerCase().includes(query))}
-function renderProjects(){const list=$('#projectList');const visible=filteredProjects();$('#allCount').textContent=projects.length;$('#workingCount').textContent=projects.filter(x=>x.status!=='done').length;$('#doneCount').textContent=projects.filter(x=>x.status==='done').length;list.innerHTML=visible.length?visible.map(projectMarkup).join(''):'<div class="panel empty-state"><span>◇</span><strong>Không có dự án phù hợp</strong><p>Tạo dự án mới từ tệp TSV hoặc CSV.</p><button class="primary" data-open-create>Tạo dự án</button></div>';bindDynamicActions();renderOverview()}
-function renderOverview(){const totalRows=projects.reduce((sum,p)=>sum+Number(p.totalRows||0),0);const translated=projects.reduce((sum,p)=>sum+Number(p.translatedRows||0),0);const progress=totalRows?Math.round(translated/totalRows*100):0;$('#overallProgress').textContent=`${progress}%`;$('#overallBar').style.width=`${progress}%`;$('#overallCaption').textContent=projects.length?`${translated.toLocaleString('vi-VN')} / ${totalRows.toLocaleString('vi-VN')} dòng`:'Chưa có dự án';const latest=projects[0];$('#currentProjectEmpty').hidden=Boolean(latest);$('#currentProjectData').hidden=!latest;if(latest){$('#currentProjectName').textContent=latest.name;$('#currentBadge').textContent=latest.status==='done'?'Hoàn thành':'Đang thực hiện';$('#currentBadge').className=`badge ${latest.status==='done'?'done':'working'}`;$('#currentProgress').textContent=`${latest.progress||0}%`;$('#currentRing').style.strokeDasharray=`${latest.progress||0} 100`;$('#currentRows').textContent=`${Number(latest.translatedRows||0).toLocaleString('vi-VN')} / ${Number(latest.totalRows||0).toLocaleString('vi-VN')} dòng`}
-const done=projects.filter(x=>x.status==='done');$('#completedGrid').innerHTML=done.length?done.map(p=>`<div class="completed-card"><div class="project-symbol teal">${initials(p.name)}</div><div><strong>${escapeHtml(p.name)}</strong><p>${Number(p.totalRows||0).toLocaleString('vi-VN')} dòng · ${escapeHtml(p.targetLanguage)}</p></div><span class="score">100</span></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có dự án hoàn thiện.</p></div>'}
-function bindDynamicActions(){$$('[data-open-create]').forEach(button=>button.onclick=()=>$('#createDialog').showModal());$$('.run-action').forEach(button=>button.onclick=()=>runWorkflow(button.dataset.projectId,button))}
+function renderProjects(){
+  const list=$('#projectList');
+  const visible=filteredProjects();
+  $('#projectNavCount').textContent=projects.length;
+  $('#allCount').textContent=projects.length;
+  $('#workingCount').textContent=projects.filter(x=>x.status!=='done').length;
+  $('#doneCount').textContent=projects.filter(x=>x.status==='done').length;
+  list.innerHTML=visible.length?visible.map(projectMarkup).join(''):'<div class="panel empty-state"><span>◇</span><strong>Không có dự án phù hợp</strong><p>Tạo dự án mới từ tệp TSV hoặc CSV.</p><button class="primary" data-open-create>Tạo dự án</button></div>';
+  bindDynamicActions();
+  renderOverview();
+}
+function renderOverview(){
+  const totalRows=projects.reduce((sum,p)=>sum+Number(p.totalRows||0),0);
+  const translated=projects.reduce((sum,p)=>sum+Number(p.translatedRows||0),0);
+  const progress=totalRows?Math.round(translated/totalRows*100):0;
+  $('#overallProgress').textContent=`${progress}%`;$('#overallBar').style.width=`${progress}%`;$('#overallCaption').textContent=projects.length?`${translated.toLocaleString('vi-VN')} / ${totalRows.toLocaleString('vi-VN')} dòng`:'Chưa có dự án';
+  const structure=projects.length?Math.round(projects.filter(project=>project.fileName&&project.totalRows>=0).length/projects.length*100):0;
+  $('#structureProgress').textContent=`${structure}%`;$('#structureBar').style.width=`${structure}%`;$('#structureCaption').textContent=projects.length?`${projects.filter(project=>project.fileName).length}/${projects.length} tệp hợp lệ`:'Chưa có dữ liệu kiểm tra';
+  const latest=projects[0];$('#currentProjectEmpty').hidden=Boolean(latest);$('#currentProjectData').hidden=!latest;
+  if(latest){$('#currentProjectName').textContent=latest.name;$('#currentBadge').textContent=latest.status==='done'?'Hoàn thành':'Đang thực hiện';$('#currentBadge').className=`badge ${latest.status==='done'?'done':'working'}`;$('#currentProgress').textContent=`${latest.progress||0}%`;$('#currentRing').style.strokeDasharray=`${latest.progress||0} 100`;$('#currentRows').textContent=`${Number(latest.translatedRows||0).toLocaleString('vi-VN')} / ${Number(latest.totalRows||0).toLocaleString('vi-VN')} dòng`}
+  const done=projects.filter(x=>x.status==='done');$('#completedGrid').innerHTML=done.length?done.map(p=>`<div class="completed-card"><div class="project-symbol teal">${initials(p.name)}</div><div><strong>${escapeHtml(p.name)}</strong><p>${Number(p.totalRows||0).toLocaleString('vi-VN')} dòng · ${escapeHtml(p.targetLanguage)}</p></div><span class="score">100</span></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có dự án hoàn thiện.</p></div>';
+}
+function bindDynamicActions(){$$('[data-open-create]').forEach(button=>button.onclick=openCreateDialog);$$('.run-action').forEach(button=>button.onclick=()=>runWorkflow(button.dataset.projectId,button));$$('[data-track-project]').forEach(button=>button.onclick=()=>openProjectTracker(button.dataset.trackProject))}
 
-async function loadProjects(){try{const data=await request('/api/projects');projects=data.projects||[];renderProjects()}catch(error){projects=[];renderProjects();showToast(error.message,true)}}
+async function loadProjects(){try{const data=await request('/api/projects');projects=data.projects||[];renderProjects();$('#systemUpdated').textContent='Vừa đồng bộ'}catch(error){projects=[];renderProjects();showToast(error.message,true)}}
 async function loadRuns(){const list=$('#runsList');try{const data=await request('/api/github-actions');runs=data.runs||[];const running=runs.filter(x=>x.status==='in_progress').length,queued=runs.filter(x=>x.status==='queued').length;$('#runningCount').textContent=running;$('#queuedCount').textContent=queued;$('#actionCount').textContent=running+queued;list.innerHTML=runs.length?runs.slice(0,4).map(run=>`<div class="timeline-item"><span class="timeline-icon ${run.conclusion==='success'?'success':'process'}">${run.conclusion==='success'?'✓':'↻'}</span><div><strong>${escapeHtml(run.name)}</strong><p>${escapeHtml(run.status)}${run.conclusion?` · ${escapeHtml(run.conclusion)}`:''}</p><small>${new Date(run.createdAt).toLocaleString('vi-VN')}</small></div></div>`).join(''):'<div class="empty-state compact-empty"><span>◇</span><p>Chưa có phiên chạy.</p></div>'}catch(error){$('#actionCount').textContent='—';list.innerHTML=`<div class="empty-state compact-empty"><span>!</span><p>${escapeHtml(error.message)}</p></div>`}}
 async function loadIntegrations(){try{const data=await request('/api/integrations');setIntegration('#hfStatus',data.checks.huggingFace);setIntegration('#githubStatus',data.checks.github);$('#hfRepo').textContent=data.dataset||'Chưa cấu hình';$('#githubRepo').textContent=data.repository||'Chưa cấu hình';$('#githubWorkflow').textContent=data.workflow||'translate.yml'}catch(error){showToast(error.message,true)}}
 function setIntegration(selector,state){const element=$(selector);element.innerHTML=`<i></i>${state.ok?'Đã kết nối':state.configured?'Lỗi kết nối':'Chưa cấu hình'}`;element.classList.toggle('connected',state.ok);element.classList.toggle('failed',state.configured&&!state.ok);if(state.error)element.title=state.error}
 
 const createDialog=$('#createDialog');
-$$('[data-open-create]').forEach(button=>button.addEventListener('click',()=>createDialog.showModal()));
+const trackerDialog=$('#trackerDialog');
+function openCreateDialog(){resetCreationProgress();createDialog.showModal()}
 $$('[data-close-dialog]').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
 $('#projectFile').addEventListener('change',event=>{$('#projectFileLabel').textContent=event.target.files[0]?.name||'Chọn tệp TSV hoặc CSV'});
-$('#createForm').addEventListener('submit',async event=>{event.preventDefault();const file=$('#projectFile').files[0];if(!file){showToast('Hãy chọn tệp TSV hoặc CSV',true);return}const button=$('#confirmCreate');button.disabled=true;button.textContent='Đang tạo...';try{const content=await file.text();const payload={name:$('#newProjectName').value.trim(),sourceLanguage:$('#sourceLanguage').value,targetLanguage:$('#targetLanguage').value,file:{name:file.name,type:file.type,content}};const data=await request('/api/projects',{method:'POST',body:JSON.stringify(payload)});projects.unshift(data.project);renderProjects();createDialog.close();$('#createForm').reset();$('#projectFileLabel').textContent='Chọn tệp TSV hoặc CSV';showToast('Đã tạo dự án và lưu lên Hugging Face');try{await runWorkflow(data.project.id)}catch{showToast('Dự án đã tạo; GitHub Actions chưa khởi chạy',true)}}catch(error){showToast(error.message,true)}finally{button.disabled=false;button.textContent='Tạo dự án thật'}});
-async function runWorkflow(projectId,button){if(button){button.disabled=true;button.textContent='Đang chạy...'}try{await request('/api/github-actions',{method:'POST',body:JSON.stringify({projectId,workers:Number($('#workerCount')?.value||12)})});showToast('Đã khởi chạy GitHub Actions');await loadRuns()}catch(error){showToast(error.message,true);throw error}finally{if(button){button.disabled=false;button.textContent='Chạy dịch'}}}
+function setCreationStep(id,state){const item=$(`[data-create-step="${id}"]`);item.className=`creation-step ${state}`;item.querySelector('i').textContent=state==='complete'?'✓':state==='error'?'!':item.dataset.createStep==='validate'?'1':item.dataset.createStep==='store'?'2':item.dataset.createStep==='record'?'3':'4'}
+function resetCreationProgress(){$('#creationProgress').hidden=true;$('#createFields').hidden=false;for(const item of $$('.creation-step'))item.className='creation-step';$('#cancelCreate').disabled=false}
+
+$('#createForm').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const file=$('#projectFile').files[0];
+  if(!file){showToast('Hãy chọn tệp TSV hoặc CSV',true);return}
+  const button=$('#confirmCreate');
+  const workers=Math.min(16,Math.max(1,Number($('#workerCount').value)||12));
+  button.disabled=true;button.textContent='Đang khởi tạo...';$('#cancelCreate').disabled=true;$('#createFields').hidden=true;$('#creationProgress').hidden=false;setCreationStep('validate','active');
+  try{
+    if(!/\.(tsv|csv)$/i.test(file.name))throw new Error('Chỉ hỗ trợ tệp TSV hoặc CSV');
+    const content=await file.text();
+    if(!content.trim()||content.trim().split(/\r?\n/).length<2)throw new Error('Tệp phải có tiêu đề và ít nhất một dòng dữ liệu');
+    setCreationStep('validate','complete');setCreationStep('store','active');
+    const payload={name:$('#newProjectName').value.trim(),sourceLanguage:$('#sourceLanguage').value,targetLanguage:$('#targetLanguage').value,file:{name:file.name,type:file.type,content}};
+    const data=await request('/api/projects',{method:'POST',body:JSON.stringify(payload)});
+    setCreationStep('store','complete');setCreationStep('record','complete');setCreationStep('dispatch','active');
+    projects.unshift(data.project);renderProjects();
+    await runWorkflow(data.project.id,null,workers,false);
+    setCreationStep('dispatch','complete');
+    await new Promise(resolve=>setTimeout(resolve,450));
+    createDialog.close();$('#createForm').reset();$('#projectFileLabel').textContent='Chọn tệp TSV hoặc CSV';resetCreationProgress();showToast('Dự án đã bắt đầu xử lý');openProjectTracker(data.project.id);
+  }catch(error){
+    const active=$('.creation-step.active');if(active)active.classList.replace('active','error');
+    showToast(error.message,true);$('#cancelCreate').disabled=false;
+  }finally{button.disabled=false;button.textContent='Tạo dự án thật'}
+});
+
+async function runWorkflow(projectId,button,workers=12,openTracker=true){
+  if(button){button.disabled=true;button.textContent='Đang chạy...'}
+  try{await request('/api/github-actions',{method:'POST',body:JSON.stringify({projectId,workers})});showToast('Đã xếp lịch xử lý');await loadRuns();if(openTracker)openProjectTracker(projectId)}catch(error){showToast(error.message,true);throw error}finally{if(button){button.disabled=false;button.textContent='Chạy dịch'}}
+}
+
+function statusIcon(status){return status==='complete'?'✓':status==='error'?'!':status==='active'?'↻':'·'}
+function renderTracker(data){
+  $('#trackerTitle').textContent=data.project.name;
+  $('#trackerStage').textContent=data.currentStage;
+  $('#trackerPercent').textContent=`${data.progress}%`;
+  $('#trackerBar').style.width=`${data.progress}%`;
+  $('#trackerUpdated').textContent=`Cập nhật lúc ${new Date(data.updatedAt).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
+  $('#trackerSteps').innerHTML=data.steps.map(item=>`<li class="${item.status}"><i>${statusIcon(item.status)}</i><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></span></li>`).join('');
+  $('#workerSummary').textContent=data.workers?`${data.summary.completed}/${data.workers} hoàn tất`:'Đang chờ';
+  $('#workerGrid').innerHTML=data.shards.length?data.shards.map(item=>`<div class="worker-chip ${item.status}" title="${escapeHtml(item.error||'')}"><i>${item.status==='completed'?'✓':item.status==='failed'?'!':item.status==='running'?'↻':'·'}</i><span>Phiên ${Number(item.index)+1}<small>${item.status==='completed'?'Hoàn tất':item.status==='failed'?'Lỗi':item.status==='running'?`${Number(item.progress||0)}%`:'Chờ'}</small></span></div>`).join(''):'<span class="worker-empty">Chưa có phiên xử lý</span>';
+  const review=$('#reviewResult');
+  review.hidden=!data.review;
+  if(data.review)review.innerHTML=`<strong>Kết quả kiểm tra</strong><span>${Number(data.review.checkedRows||0).toLocaleString('vi-VN')} dòng · ${Number(data.review.issueCount||0).toLocaleString('vi-VN')} điểm cần xem lại</span>`;
+  const index=projects.findIndex(project=>project.id===data.project.id);if(index>=0){projects[index]=data.project;renderProjects()}
+  $('#trackerError').hidden=true;
+  if(data.progress===100){clearInterval(trackerTimer);trackerTimer=null}
+}
+async function refreshProjectTracker(){
+  if(!trackedProjectId)return;
+  try{const data=await request(`/api/project-status?id=${encodeURIComponent(trackedProjectId)}`);renderTracker(data)}catch(error){$('#trackerError').hidden=false;$('#trackerError').textContent=error.message}
+}
+function openProjectTracker(projectId){
+  trackedProjectId=projectId;clearInterval(trackerTimer);$('#trackerStage').textContent='Đang tải trạng thái...';$('#trackerPercent').textContent='0%';$('#trackerBar').style.width='0%';$('#trackerSteps').innerHTML='<li class="active"><i>↻</i><span><strong>Đang đồng bộ</strong><small>Vui lòng chờ trong giây lát</small></span></li>';$('#workerGrid').innerHTML='<span class="worker-empty">Đang tải...</span>';$('#trackerError').hidden=true;
+  if(!trackerDialog.open)trackerDialog.showModal();
+  refreshProjectTracker();trackerTimer=setInterval(refreshProjectTracker,5000);
+}
+function closeProjectTracker(){clearInterval(trackerTimer);trackerTimer=null;trackedProjectId=null;trackerDialog.close()}
+$('#closeTracker').addEventListener('click',closeProjectTracker);$('#doneTracker').addEventListener('click',closeProjectTracker);$('#refreshTracker').addEventListener('click',refreshProjectTracker);trackerDialog.addEventListener('close',()=>{clearInterval(trackerTimer);trackerTimer=null;trackedProjectId=null});
 
 $$('.filter').forEach(button=>button.addEventListener('click',()=>{$$('.filter').forEach(x=>x.classList.remove('active'));button.classList.add('active');activeFilter=button.dataset.filter;renderProjects()}));
 $('#projectSearch').addEventListener('input',renderProjects);
@@ -42,5 +128,4 @@ $('#refreshIntegrations').addEventListener('click',loadIntegrations);
 $('#createVersion').addEventListener('click',()=>showToast('Phiên bản được tạo khi mã nguồn được triển khai'));
 $$('.restore').forEach(button=>button.addEventListener('click',()=>showToast('Khôi phục phiên bản được quản lý bởi GitHub')));
 
-loadProjects();
-loadRuns();
+bindDynamicActions();loadProjects();loadRuns();
