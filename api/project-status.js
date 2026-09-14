@@ -1,62 +1,36 @@
 import {allowMethods,readDatasetJson,readProjects,readProjectStatus,send} from './_shared.js';
 
 const step=(id,label,status,detail)=>({id,label,status,detail});
+const when=value=>{const parsed=Date.parse(value||'');return Number.isFinite(parsed)?parsed:0};
 
 export default async function handler(req,res){
   if(!allowMethods(req,res,['GET']))return;
   try{
-    const projectId=String(req.query?.id||'');
-    if(!projectId)return send(res,400,{error:'Thiếu mã dự án'});
-    const projects=await readProjects();
-    const project=projects.find(item=>item.id===projectId);
-    if(!project)return send(res,404,{error:'Không tìm thấy dự án'});
-
-    const [created,dispatch,review,completedReport,manual]=await Promise.all([
-      readProjectStatus(projectId,'project'),
-      readProjectStatus(projectId,'dispatch'),
-      readProjectStatus(projectId,'review'),
-      readDatasetJson(`results/${projectId}/review.json`),
-      readProjectStatus(projectId,'manual')
-    ]);
-    const workers=Math.min(16,Math.max(0,Number(dispatch?.workers)||0));
-    const storedShards=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`shard-${index}`))):[];
-    const shards=storedShards.map(item=>item?.runId===dispatch?.runId?item:null);
-    const currentReview=review?.runId===dispatch?.runId?review:null;
-    const summary={pending:0,running:0,completed:0,paused:0,failed:0};
-    let processedRows=0;
-    for(const shard of shards){
-      const state=shard?.status||'pending';
-      if(state in summary)summary[state]+=1;else summary.pending+=1;
-      processedRows+=Math.max(0,Number(shard?.processedRows)||0);
-    }
-    const savedRows=storedShards.reduce((total,shard)=>total+Math.max(0,Number(shard?.processedRows)||0),0);
-    processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,savedRows,Number(manual?.translatedRows)||0));
-    const translationComplete=workers>0&&summary.completed===workers;
-    const translationPercent=Number(project.totalRows)?Math.round(processedRows/Number(project.totalRows)*100):(translationComplete?100:0);
-    const reviewState=currentReview?.status||'waiting';
-    const hasPause=summary.paused>0||reviewState==='paused';
-    const hasFailure=summary.failed>0||reviewState==='failed';
-    const archivedComplete=Number(completedReport?.checkedRows)>=Number(project.totalRows)&&Number(project.totalRows)>0;
-    if(archivedComplete)processedRows=Number(project.totalRows);
-    const isComplete=archivedComplete||(translationComplete&&reviewState==='completed');
-    const effectiveReview=archivedComplete?{status:'completed',progress:100,checkedRows:Number(completedReport.checkedRows),issueCount:Number(completedReport.issueCount)||0,completedAt:completedReport.completedAt,restored:true}:currentReview;
-    const responseWorkers=archivedComplete?1:workers;
-    const responseSummary=archivedComplete?{pending:0,running:0,completed:1,paused:0,failed:0}:summary;
-    const responseShards=archivedComplete?[{index:0,status:'completed',progress:100,processedRows:Number(project.totalRows),restored:true}]:shards.map((item,index)=>item||{index,status:'pending'});
-    const reviewPercent=isComplete?100:Math.max(0,Math.min(100,Number(currentReview?.progress)||0));
-    const progress=isComplete?100:reviewState==='running'||reviewState==='paused'?Math.min(99,85+Math.round(reviewPercent*.14)):dispatch?Math.min(85,20+Math.round(translationPercent*.65)):created?15:0;
-    const state=isComplete?'done':hasFailure?'failed':hasPause?'paused':'working';
-    const currentStage=isComplete?'Hoàn thành':hasFailure?'Cần kiểm tra':hasPause?'Tạm dừng — tiến độ đã được lưu':reviewState==='running'?'Đang kiểm tra bản dịch':translationComplete?'Đang chờ kiểm tra':summary.running+summary.completed>0?'Đang dịch và lưu từng chặng':dispatch?'Đang chờ phiên xử lý':'Đã khởi tạo';
-    const pausedMessage=shards.find(item=>item?.status==='paused')?.message||currentReview?.message||'Có thể chọn Tiếp tục sau khi giới hạn được làm mới.';
+    const projectId=String(req.query?.id||'');if(!projectId)return send(res,400,{error:'Thiếu mã dự án'});
+    const projects=await readProjects();const project=projects.find(item=>item.id===projectId);if(!project)return send(res,404,{error:'Không tìm thấy dự án'});
+    const [created,dispatch,review,completedReport,manual,coordinator]=await Promise.all([readProjectStatus(projectId,'project'),readProjectStatus(projectId,'dispatch'),readProjectStatus(projectId,'review'),readDatasetJson(`results/${projectId}/review.json`),readProjectStatus(projectId,'manual'),readProjectStatus(projectId,'coordinator')]);
+    const workers=Math.min(4,Math.max(0,Number(dispatch?.workers)||0));const currentCoordinator=coordinator?.runId===dispatch?.runId?coordinator:null;const modern=Boolean(currentCoordinator);
+    const storedWorkers=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`${modern?'worker':'shard'}-${index}`))):[];const activeWorkers=storedWorkers.map(item=>item?.runId===dispatch?.runId?item:null);const currentReview=review?.runId===dispatch?.runId?review:null;
+    const summary={pending:0,running:0,completed:0,paused:0,failed:0};let processedRows=0;let completedTasks=0;
+    for(const worker of activeWorkers){const status=worker?.status||'pending';if(status in summary)summary[status]+=1;else summary.pending+=1;processedRows+=Math.max(0,Number(worker?.processedRows)||0);completedTasks+=Math.max(0,Number(worker?.completedTasks)||0)}
+    if(!modern){const storedRows=storedWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.processedRows)||0),0);processedRows=Math.max(processedRows,storedRows)}
+    processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,Number(manual?.translatedRows)||0));
+    const translationComplete=modern?Boolean(currentCoordinator?.totalTasks>=0&&completedTasks>=Number(currentCoordinator.totalTasks)&&workers>0&&summary.completed===workers):workers>0&&summary.completed===workers;
+    const reviewState=currentReview?.status||'waiting';const hasPause=summary.paused>0||reviewState==='paused';const hasFailure=summary.failed>0||reviewState==='failed';
+    const totalRows=Number(project.totalRows)||0;const reportComplete=totalRows>0&&Number(completedReport?.checkedRows)>=totalRows;const manualComplete=totalRows>0&&Number(manual?.translatedRows)>=totalRows;const completionAt=Math.max(when(completedReport?.completedAt),when(manual?.updatedAt));const activeAfterCompletion=Boolean(dispatch?.runId&&when(dispatch?.queuedAt)>completionAt);const archivedComplete=(reportComplete||manualComplete)&&!activeAfterCompletion;
+    if(archivedComplete)processedRows=totalRows;const isComplete=archivedComplete||(translationComplete&&reviewState==='completed');const effectiveReview=isComplete&&completedReport?{status:'completed',progress:100,checkedRows:Number(completedReport.checkedRows)||totalRows,issueCount:Number(completedReport.issueCount)||0,correctionCount:Number(completedReport.correctionCount)||0,completedAt:completedReport.completedAt,restored:archivedComplete}:currentReview;
+    const translationPercent=totalRows?Math.round(processedRows/totalRows*100):(translationComplete?100:0);const reviewPercent=isComplete?100:Math.max(0,Math.min(100,Number(currentReview?.progress)||0));const progress=isComplete?100:reviewState==='running'||reviewState==='paused'?Math.min(99,85+Math.round(reviewPercent*.14)):dispatch?Math.min(85,15+Math.round(translationPercent*.7)):created?10:0;const state=isComplete?'done':hasFailure?'failed':hasPause?'paused':'working';
+    const currentStage=isComplete?'Hoàn thành':hasFailure?'Cần kiểm tra':hasPause?'Tạm dừng - mọi tác vụ đã được lưu':reviewState==='running'?'Đang kiểm tra và cân nhắc chỉnh sửa':translationComplete?'Đang chờ kiểm tra cuối':modern&&summary.running+summary.completed>0?'Các luồng con đang nhận tác vụ':currentCoordinator?'Đã phân loại và đang chờ luồng con':dispatch?'Luồng điều phối đang phân loại':'Đã khởi tạo';
+    const categories=currentCoordinator?.categories||completedReport?.categories||null;const categoryDetail=categories?`Menu ${Number(categories.menu)||0} · Tương tác ${Number(categories.interaction)||0} · Cốt truyện ${Number(categories.story)||0}`:'';const pausedMessage=activeWorkers.find(item=>item?.status==='paused')?.message||currentReview?.message||'Có thể chọn Tiếp tục sau khi giới hạn được làm mới.';
+    const responseWorkers=archivedComplete?1:workers;const responseSummary=archivedComplete?{pending:0,running:0,completed:1,paused:0,failed:0}:summary;const responseItems=archivedComplete?[{index:0,status:'completed',progress:100,processedRows:totalRows,completedTasks:Number(currentCoordinator?.totalTasks)||1,totalTasks:Number(currentCoordinator?.totalTasks)||1,restored:true}]:activeWorkers.map((item,index)=>item||{index,status:'pending',completedTasks:0,totalTasks:0});
     const steps=[
-      step('validate','Kiểm tra tệp',archivedComplete||created?.fileValidated?'complete':'active',archivedComplete||created?.fileValidated?'Định dạng tệp hợp lệ':'Đang kiểm tra'),
-      step('store','Lưu dữ liệu',archivedComplete||created?.stored?'complete':created?'active':'waiting',archivedComplete||created?.stored?'Đã lưu an toàn':'Đang chờ'),
-      step('create','Khởi tạo dự án',archivedComplete||created?'complete':'waiting',archivedComplete||created?'Đã tạo hồ sơ dự án':'Đang chờ'),
-      step('dispatch','Xếp lịch xử lý',archivedComplete||dispatch?'complete':'waiting',archivedComplete?'Đã hoàn tất ở phiên trước':dispatch?`${workers} phiên tiết kiệm lượt Google`:'Chưa khởi chạy'),
-      step('translate','Dịch và lưu từng chặng',isComplete?'complete':summary.failed?'error':summary.paused?'paused':translationComplete?'complete':dispatch?'active':'waiting',archivedComplete?`${processedRows}/${Number(project.totalRows)||0} dòng đã lưu`:workers?`${processedRows}/${Number(project.totalRows)||0} dòng đã lưu · ${summary.completed}/${workers} phiên hoàn tất`:'Đang chờ'),
-      step('review','Kiểm tra bản dịch',isComplete?'complete':reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',isComplete?`${Number(effectiveReview.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='paused'?`${Number(currentReview.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
-      step('complete','Hoàn tất dự án',isComplete?'complete':hasFailure?'error':hasPause?'paused':'waiting',isComplete?'Có thể tải kết quả':hasPause?pausedMessage:'Đang chờ')
+      step('validate','Kiểm tra tệp',isComplete||created?.fileValidated?'complete':'active',isComplete||created?.fileValidated?'Định dạng tệp hợp lệ':'Đang kiểm tra'),
+      step('store','Lưu dữ liệu',isComplete||created?.stored?'complete':created?'active':'waiting',isComplete||created?.stored?'Đã lưu an toàn':'Đang chờ'),
+      step('coordinate','Phân công và phân loại',isComplete||currentCoordinator?'complete':dispatch?'active':'waiting',isComplete&&!currentCoordinator?'Đã hoàn tất ở phiên trước':currentCoordinator?`${currentCoordinator.totalTasks} tác vụ · ${currentCoordinator.taskSize} dòng/tác vụ${categoryDetail?` · ${categoryDetail}`:''}`:dispatch?'Đang nhận diện nội dung':'Chưa khởi chạy'),
+      step('translate','Dịch các tác vụ nhỏ',isComplete?'complete':summary.failed?'error':summary.paused?'paused':translationComplete?'complete':currentCoordinator?'active':'waiting',isComplete?`${processedRows}/${totalRows} dòng đã lưu`:currentCoordinator?`${processedRows}/${totalRows} dòng · ${completedTasks}/${currentCoordinator.totalTasks} tác vụ đã lưu`:'Đang chờ phân công'),
+      step('review','Kiểm tra và cân nhắc chỉnh sửa',isComplete?'complete':reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',isComplete?`${Number(effectiveReview?.checkedRows||totalRows).toLocaleString('vi-VN')} dòng · ${Number(effectiveReview?.correctionCount||0)} chỉnh sửa`:reviewState==='paused'?`${Number(currentReview?.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Chờ mọi tác vụ hoàn tất'),
+      step('complete','Tạo tệp hoàn chỉnh',isComplete?'complete':hasFailure?'error':hasPause?'paused':'waiting',isComplete?'Sẵn sàng tải xuống':hasPause?pausedMessage:'Đang chờ')
     ];
-    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers:responseWorkers,summary:responseSummary,shards:responseShards,review:effectiveReview,manual,steps,updatedAt:new Date().toISOString()});
+    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers:responseWorkers,summary:responseSummary,shards:responseItems,coordinator:currentCoordinator||categories&&{categories,totalTasks:Number(currentCoordinator?.totalTasks)||0,taskSize:Number(currentCoordinator?.taskSize)||0},completedTasks,totalTasks:Number(currentCoordinator?.totalTasks)||0,review:effectiveReview,manual,steps,updatedAt:new Date().toISOString()});
   }catch(error){send(res,500,{error:error.message})}
 }

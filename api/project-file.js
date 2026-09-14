@@ -39,13 +39,21 @@ async function buildProjectFile(project){
   if(rows.length<2)throw new Error('Tệp nguồn không có dữ liệu');
   const {target,source}=columnsFor(rows);
 
-  const checkpointPaths=(await listDatasetFiles(`checkpoints/${project.id}/`)).filter(path=>/\/shard-\d+\.json$/i.test(path));
+  const allPaths=await listDatasetFiles();
+  const checkpointPaths=allPaths.filter(path=>path.startsWith(`checkpoints/${project.id}/`)&&/\/shard-\d+\.json$/i.test(path));
   for(const path of checkpointPaths){
     const checkpoint=await readDatasetJson(path);
     for(const item of checkpoint?.translations||[]){const row=rows[Number(item.index)+1];if(row)row[target]=String(item.translation||'')}
   }
 
-  const resultPaths=(await listDatasetFiles(`results/${project.id}/`)).filter(path=>/\/shard-\d+\.tsv$/i.test(path));
+  const taskCheckpointPaths=allPaths.filter(path=>path.startsWith(`checkpoints/${project.id}/tasks/`)&&/\.json$/i.test(path));
+  for(const path of taskCheckpointPaths){
+    const checkpoint=await readDatasetJson(path);
+    if(!checkpoint?.complete)continue;
+    for(const item of checkpoint.translations||[]){const row=rows[Number(item.index)+1];if(row)row[target]=String(item.translation||'')}
+  }
+
+  const resultPaths=allPaths.filter(path=>path.startsWith(`results/${project.id}/`)&&/\/shard-\d+\.tsv$/i.test(path));
   const sourceRowsByKey=new Map();
   for(let index=1;index<rows.length;index+=1){const key=`${String(rows[index][0]||'')}\u0000${String(rows[index][source]||'')}`;if(!sourceRowsByKey.has(key))sourceRowsByKey.set(key,[]);sourceRowsByKey.get(key).push(index)}
   const usedByKey=new Map();

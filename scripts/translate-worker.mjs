@@ -1,154 +1,65 @@
 import {createHash} from 'node:crypto';
-import {downloadFile,uploadFiles} from '@huggingface/hub';
-import {GooglePauseError,makeBatches,requestGoogle,sleep} from './google-api.mjs';
+import {GooglePauseError,requestGoogle,sleep} from './google-api.mjs';
+import {jsonFile,readJson,readText,StoragePauseError,uploadWithRetry} from './hf-pipeline.mjs';
+import {detectColumns,parseDelimited} from './tabular.mjs';
 
-const required=['PROJECT_ID','RUN_ID','SHARD_INDEX','SHARD_COUNT','HF_TOKEN','HF_DATASET_REPO','GEMINI_API_KEY'];
+const required=['PROJECT_ID','RUN_ID','WORKER_INDEX','WORKER_COUNT','HF_TOKEN','HF_DATASET_REPO','GEMINI_API_KEY'];
 for(const key of required)if(!process.env[key])throw new Error(`Missing required secret or variable: ${key}`);
-const repo={type:'dataset',name:process.env.HF_DATASET_REPO};
-const accessToken=process.env.HF_TOKEN;
-const projectId=process.env.PROJECT_ID;
-const runId=process.env.RUN_ID;
-const shardIndex=Number(process.env.SHARD_INDEX);
-const shardCount=Number(process.env.SHARD_COUNT);
-const checkpointPath=`checkpoints/${projectId}/shard-${shardIndex}.json`;
-const statusPath=`status/${projectId}/shard-${shardIndex}.json`;
+const projectId=process.env.PROJECT_ID;const runId=process.env.RUN_ID;const workerIndex=Number(process.env.WORKER_INDEX);const workerCount=Math.min(4,Math.max(1,Number(process.env.WORKER_COUNT)||1));
+const statusPath=`status/${projectId}/worker-${workerIndex}.json`;const baseSpacing=Math.max(12_500,Number(process.env.GEMINI_REQUEST_SPACING_MS)||13_000);
 
-class StoragePauseError extends Error{constructor(message){super(message);this.name='StoragePauseError'}}
-
-function storageWait(error){
-  if(Number(error?.statusCode)!==429&&!/rate limit for repository commits/i.test(String(error)))return 0;
-  const minutes=Number(String(error).match(/retry this action in (\d+) minutes?/i)?.[1]);
-  return (Number.isFinite(minutes)&&minutes>0?minutes:2)*60_000+10_000;
-}
-
-async function readJson(path){
-  try{const response=await downloadFile({repo,path,accessToken});return response?JSON.parse(await response.text()):null}catch(error){if(String(error).includes('404'))return null;throw error}
-}
-async function readText(path){
-  try{const response=await downloadFile({repo,path,accessToken});return response?response.text():null}catch(error){if(String(error).includes('404'))return null;throw error}
-}
-
-async function uploadWithRetry(files){
-  let lastError;
-  for(let attempt=1;attempt<=3;attempt+=1)try{
-    await uploadFiles({repo,accessToken,files});
-    return;
-  }catch(error){
-    lastError=error;
-    const wait=storageWait(error);
-    if(wait&&attempt<3){console.warn(`Hugging Face commit limit reached; waiting ${Math.ceil(wait/60_000)} minutes`);await sleep(wait);continue}
-    if(wait)break;
-    if(attempt<3)await sleep(800*attempt+shardIndex*120+Math.round(Math.random()*500));
-  }
-  if(storageWait(lastError))throw new StoragePauseError('Hugging Face đang giới hạn số lần lưu. Phiên sẽ dừng an toàn và có thể tiếp tục sau.')
-  throw lastError;
-}
-
-function statusFile(status,extra={}){
-  return{path:statusPath,content:new Blob([JSON.stringify({runId,index:shardIndex,status,updatedAt:new Date().toISOString(),...extra},null,2)],{type:'application/json'})};
-}
-
-function checkpointFile(checkpoint){return{path:checkpointPath,content:new Blob([JSON.stringify(checkpoint,null,2)],{type:'application/json'})}}
-async function persist(checkpoint,status,extra={}){await uploadWithRetry([checkpointFile(checkpoint),statusFile(status,extra)])}
-async function writeStatus(status,extra={}){await uploadWithRetry([statusFile(status,extra)])}
-
-function translatedOutput(header,selected,targetColumn,delimiter,translations){
-  const output=[targetColumn>=0?header:`${header}${delimiter}Vietnamese`];
-  for(const item of selected){
-    const columns=item.line.split(delimiter);
-    const translation=translations.get(item.index)||'';
-    if(targetColumn>=0)columns[targetColumn]=translation;else columns.push(translation);
-    output.push(columns.join(delimiter));
-  }
-  return output.join('\n');
-}
+function workerStatus(status,extra={}){return jsonFile(statusPath,{runId,index:workerIndex,status,updatedAt:new Date().toISOString(),...extra})}
+function taskCheckpoint(task,data){return jsonFile(`checkpoints/${projectId}/tasks/${task.id}.json`,data)}
+function parseGooglePayload(payload){const text=payload?.candidates?.[0]?.content?.parts?.[0]?.text||'[]';const parsed=JSON.parse(text);if(!Array.isArray(parsed))throw new Error('Google AI did not return an array');return parsed}
 
 async function main(){
-  let checkpoint;
   try{
-    const metadataResponse=await downloadFile({repo,path:'projects.json',accessToken});
-    if(!metadataResponse)throw new Error('projects.json not found');
-    const projects=JSON.parse(await metadataResponse.text());
-    const project=projects.find(item=>item.id===projectId);
-    if(!project)throw new Error(`Project not found: ${projectId}`);
-    const sourceResponse=await downloadFile({repo,path:`projects/${project.id}/${project.fileName}`,accessToken});
-    if(!sourceResponse)throw new Error('Source file not found');
-    const source=await sourceResponse.text();
-    const sourceHash=createHash('sha256').update(source).digest('hex');
-    const delimiter=/\.csv$/i.test(project.fileName)?',':'\t';
-    const lines=source.trim().split(/\r?\n/);
-    const header=lines.shift();
-    const headerColumns=header.split(delimiter);
-    const targetColumn=headerColumns.findIndex(column=>/^(vietnamese|vi|translation)$/i.test(column.trim()));
-    const sourceColumn=headerColumns.findIndex((column,index)=>index!==targetColumn&&/^(languages?|source|english|text|original)$/i.test(column.trim()));
-    const selected=lines.map((line,index)=>({line,index})).filter(item=>item.index%shardCount===shardIndex);
-    const stored=await readJson(checkpointPath);
-    const usable=stored?.version===1&&stored.sourceHash===sourceHash&&stored.shardCount===shardCount&&stored.shardIndex===shardIndex;
-    const translations=new Map((usable?stored.translations:[]).map(item=>[Number(item.index),String(item.translation||'')]));
-    const finalExtension=delimiter===','?'csv':'tsv';
-    const manualContent=await readText(`results/${project.id}/final.${finalExtension}`);
-    if(manualContent){
-      const manualLines=manualContent.trim().split(/\r?\n/);manualLines.shift();
-      manualLines.forEach((line,index)=>{if(index%shardCount!==shardIndex)return;const value=line.split(delimiter)[targetColumn];if(String(value||'').trim())translations.set(index,String(value))});
-    }
-    checkpoint={version:1,projectId,sourceHash,shardIndex,shardCount,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
-    let apiRequests=Number(usable?stored.apiRequests:0)||0;
-    const completedBefore=selected.filter(item=>translations.has(item.index)).length;
-    const sourceText=item=>{
-      const columns=item.line.split(delimiter);
-      const value=columns[sourceColumn>=0?sourceColumn:Math.min(1,columns.length-1)]||'';
-      return{index:item.index,key:columns[0]||'',text:value};
-    };
-    const remaining=selected.filter(item=>!translations.has(item.index));
-    const batches=makeBatches(remaining,sourceText);
-    await sleep(shardIndex*900);
+    const manifest=await readJson(`queues/${projectId}/${runId}/manifest.json`);if(!manifest)throw new Error('Coordinator manifest not found');
+    const projects=await readJson('projects.json');const project=projects?.find(item=>item.id===projectId);if(!project)throw new Error(`Project not found: ${projectId}`);
+    const source=await readText(`projects/${project.id}/${project.fileName}`);if(source===null)throw new Error('Source file not found');
+    const sourceHash=createHash('sha256').update(source).digest('hex');if(sourceHash!==manifest.sourceHash)throw new Error('Source file changed after task assignment');
+    const rows=parseDelimited(source,manifest.delimiter);const columns=detectColumns(rows);const dataRows=rows.slice(1);const assigned=manifest.tasks.filter(task=>task.sequence%workerCount===workerIndex);
+    const extension=manifest.delimiter===','?'csv':'tsv';const manualContent=await readText(`results/${project.id}/final.${extension}`);const manualRows=manualContent?parseDelimited(manualContent,manifest.delimiter):[];const manualColumns=manualRows.length?detectColumns(manualRows):null;
+    let completedTasks=0;let processedRows=0;let apiRequests=0;let recentContext=[];let lastRequestAt=0;let finalStatusWritten=false;
+    if(workerIndex>0)await sleep(workerIndex*baseSpacing);
 
-    for(let batchIndex=0;batchIndex<batches.length;batchIndex+=1){
-      const batch=batches[batchIndex];
-      const prompt=`Translate the following game localization strings from ${project.sourceLanguage} to ${project.targetLanguage}.
-Preserve placeholders, markup, proper names and locations exactly. Keep pronouns, terminology and tone consistent across this batch. Translate only the text field; use the key only as context.
-Return JSON only as an array of objects with fields index and translation. Return exactly one object for every supplied index. Do not add Markdown.\n\n${JSON.stringify(batch.map(sourceText))}`;
-      let payload;
-      try{
-        const response=await requestGoogle({prompt,temperature:0.2,label:'Google AI translation'});
-        payload=response.payload;
-        apiRequests+=response.attempts;
-      }catch(error){
-        if(!(error instanceof GooglePauseError))throw error;
-        apiRequests+=Number(error.attempts)||1;
-        checkpoint={...checkpoint,apiRequests,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
-        const processedRows=selected.filter(item=>translations.has(item.index)).length;
-        const progress=selected.length?Math.round(processedRows/selected.length*100):100;
-        await persist(checkpoint,'paused',{progress,processedRows,totalRows:selected.length,apiRequests,pauseReason:error.reason,message:error.message,pausedAt:new Date().toISOString()});
-        console.warn(error.message);
-        return;
+    for(const task of assigned){
+      const stored=await readJson(`checkpoints/${projectId}/tasks/${task.id}.json`);const usable=stored?.version===2&&stored.sourceHash===sourceHash&&stored.category===task.category;
+      const translations=new Map((usable?stored.translations:[]).map(item=>[Number(item.index),String(item.translation||'')]));
+      if(manualColumns)for(const index of task.rowIndexes){const value=manualRows[index+1]?.[manualColumns.target];if(String(value||'').trim())translations.set(index,String(value))}
+      const remaining=task.rowIndexes.filter(index=>!String(translations.get(index)||'').trim());
+
+      if(remaining.length){
+        const sharedPause=await readJson(`status/${projectId}/quota.json`);if(sharedPause?.runId===runId&&sharedPause?.reason==='daily_quota'){await uploadWithRetry([workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,apiRequests,pauseReason:'daily_quota',message:'Một luồng đã phát hiện hết lượt Google hôm nay. Luồng này dừng trước khi gửi thêm yêu cầu.',pausedAt:new Date().toISOString()})]);return}
+        const elapsed=Date.now()-lastRequestAt;const requiredGap=baseSpacing*workerCount;if(lastRequestAt&&elapsed<requiredGap)await sleep(requiredGap-elapsed);
+        const input=remaining.map(index=>({index,key:String(dataRows[index]?.[columns.key]||''),text:String(dataRows[index]?.[columns.source]||'')}));
+        const prompt=`You translate one small task in a game localization pipeline. Project: ${project.name}. Category: ${task.category}.
+Translate from ${project.sourceLanguage} to ${project.targetLanguage}. Preserve placeholders, tags, variables, proper names and locations exactly. Keep terminology, pronouns, tone and capitalization consistent within this category. Translate only text; key is context.
+Recent approved context from this worker: ${JSON.stringify(recentContext.slice(-12))}
+Return JSON only: an array with exactly one object per input, fields index and translation. No Markdown.
+
+${JSON.stringify(input)}`;
+        let translated=null;
+        for(let formatAttempt=1;formatAttempt<=2;formatAttempt+=1){
+          try{const response=await requestGoogle({prompt:formatAttempt===1?prompt:`${prompt}\nIMPORTANT: The previous response was incomplete. Return every index exactly once.`,temperature:0.2,label:`Google AI task ${task.id}`});lastRequestAt=Date.now();apiRequests+=response.attempts;const parsed=parseGooglePayload(response.payload);const byIndex=new Map(parsed.map(item=>[Number(item.index),String(item.translation||'')]));if(input.some(item=>!byIndex.get(item.index)))throw new Error('Incomplete task response');translated=byIndex;break}
+          catch(error){
+            if(error instanceof GooglePauseError){const pausedAt=new Date().toISOString();const files=[workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assigned.reduce((sum,item)=>sum+item.rowCount,0),apiRequests,pauseReason:error.reason,message:error.message,pausedAt})];if(error.reason==='daily_quota')files.push(jsonFile(`status/${projectId}/quota.json`,{runId,reason:'daily_quota',message:error.message,pausedAt,workerIndex}));await uploadWithRetry(files);console.warn(error.message);return}
+            if(formatAttempt===2){await uploadWithRetry([workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,apiRequests,pauseReason:'invalid_response',message:'Phản hồi dịch chưa đầy đủ. Tác vụ này sẽ được thử lại ở lần chạy tiếp theo.',pausedAt:new Date().toISOString()})]);console.warn(error.message);return}
+            await sleep(baseSpacing*workerCount);
+          }
+        }
+        for(const [index,translation] of translated)translations.set(index,translation);
       }
 
-      const text=payload.candidates?.[0]?.content?.parts?.[0]?.text;
-      const translated=JSON.parse(text||'[]');
-      const byIndex=new Map(translated.map(item=>[Number(item.index),String(item.translation||'')]));
-      const missing=batch.filter(item=>!byIndex.get(item.index));
-      if(missing.length)throw new Error(`Google AI returned an incomplete batch (${missing.length} missing translations)`);
-      for(const item of batch)translations.set(item.index,byIndex.get(item.index));
-      const processedRows=selected.filter(item=>translations.has(item.index)).length;
-      const progress=selected.length?Math.round(processedRows/selected.length*100):100;
-      checkpoint={...checkpoint,apiRequests,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
-      if(batchIndex<batches.length-1)await persist(checkpoint,'running',{progress,processedRows,totalRows:selected.length,apiRequests,resumed:completedBefore>0,checkpointedAt:checkpoint.updatedAt});
+      const taskTranslations=task.rowIndexes.map(index=>({index,translation:String(translations.get(index)||'')}));const complete=taskTranslations.every(item=>item.translation.trim());
+      if(!complete){await uploadWithRetry([workerStatus('paused',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,apiRequests,pauseReason:'incomplete_task',message:'Tác vụ chưa đủ bản dịch và sẽ được thử lại.'})]);return}
+      completedTasks+=1;processedRows+=task.rowCount;recentContext.push(...task.rowIndexes.slice(-6).map(index=>({source:String(dataRows[index]?.[columns.source]||''),translation:String(translations.get(index)||'')})));recentContext=recentContext.slice(-12);
+      const completedAt=new Date().toISOString();const checkpoint={version:2,projectId,sourceHash,taskId:task.id,category:task.category,rowIndexes:task.rowIndexes,translations:taskTranslations,complete:true,apiRequests,completedAt};
+      if(!(usable&&stored.complete&&remaining.length===0)){const isLast=completedTasks===assigned.length;await uploadWithRetry([taskCheckpoint(task,checkpoint),workerStatus(isLast?'completed':'running',{currentTask:task.id,category:task.category,completedTasks,totalTasks:assigned.length,processedRows,totalRows:assigned.reduce((sum,item)=>sum+item.rowCount,0),apiRequests,completedAt:isLast?completedAt:undefined})]);if(isLast)finalStatusWritten=true}
     }
-
-    const output=translatedOutput(header,selected,targetColumn,delimiter,translations);
-    checkpoint={...checkpoint,complete:true,apiRequests,translations:[...translations].map(([index,translation])=>({index,translation})),updatedAt:new Date().toISOString()};
-    await uploadWithRetry([
-      {path:`results/${project.id}/shard-${shardIndex}.tsv`,content:new Blob([output],{type:'text/tab-separated-values'})},
-      checkpointFile(checkpoint),
-      statusFile('completed',{progress:100,processedRows:selected.length,totalRows:selected.length,apiRequests,completedAt:new Date().toISOString()})
-    ]);
-    console.log(`Translated ${selected.length} rows for shard ${shardIndex}/${shardCount}; ${remaining.length} new rows; ${apiRequests} API attempts total`);
-  }catch(error){
-    if(error instanceof StoragePauseError){console.warn(error.message);return}
-    try{await writeStatus('failed',{error:error.message,failedAt:new Date().toISOString()})}catch(statusError){console.error('Could not save failed status:',statusError.message)}
-    throw error;
-  }
+    if(!finalStatusWritten)await uploadWithRetry([workerStatus('completed',{completedTasks,totalTasks:assigned.length,processedRows,totalRows:assigned.reduce((sum,item)=>sum+item.rowCount,0),apiRequests,completedAt:new Date().toISOString()})]);
+    console.log(`Worker ${workerIndex} completed ${completedTasks}/${assigned.length} small tasks and saved ${processedRows} rows`);
+  }catch(error){if(error instanceof StoragePauseError){console.warn(error.message);return}try{await uploadWithRetry([workerStatus('failed',{error:error.message,failedAt:new Date().toISOString()})])}catch{}throw error}
 }
 
 await main();

@@ -1,4 +1,4 @@
-name: Translate project
+name: Coordinated translation pipeline
 
 on:
   workflow_dispatch:
@@ -28,8 +28,17 @@ jobs:
       shards: ${{ steps.matrix.outputs.shards }}
       count: ${{ steps.matrix.outputs.count }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - id: matrix
-        name: Prepare worker matrix
+        name: Prepare child worker matrix
         env:
           WORKERS: ${{ inputs.workers }}
         run: |
@@ -39,6 +48,14 @@ jobs:
           shards=$(seq 0 $((count - 1)) | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
           echo "count=$count" >> "$GITHUB_OUTPUT"
+      - name: Coordinate and classify small tasks
+        run: node scripts/coordinate-project.mjs
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          RUN_ID: ${{ inputs.run_id }}
+          WORKER_COUNT: ${{ steps.matrix.outputs.count }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
 
   translate:
     needs: prepare
@@ -46,7 +63,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+        worker: ${{ fromJSON(needs.prepare.outputs.shards) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,16 +77,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Translate shard
+      - name: Translate assigned 10-50 row tasks
         run: node scripts/translate-worker.mjs
         env:
           PROJECT_ID: ${{ inputs.project_id }}
           RUN_ID: ${{ inputs.run_id }}
-          SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ needs.prepare.outputs.count }}
+          WORKER_INDEX: ${{ matrix.worker }}
+          WORKER_COUNT: ${{ needs.prepare.outputs.count }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_REQUEST_SPACING_MS: ${{ vars.GEMINI_REQUEST_SPACING_MS }}
 
   review:
     needs: [prepare, translate]
@@ -86,12 +104,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Review completed translation
+      - name: Final review and correction
         run: node scripts/review-project.mjs
         env:
           PROJECT_ID: ${{ inputs.project_id }}
           RUN_ID: ${{ inputs.run_id }}
-          SHARD_COUNT: ${{ needs.prepare.outputs.count }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
