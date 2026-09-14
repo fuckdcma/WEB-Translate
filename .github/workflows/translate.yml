@@ -1,0 +1,45 @@
+name: Translate project
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: Hugging Face project ID
+        required: true
+        type: string
+      workers:
+        description: Number of parallel workers
+        required: true
+        default: "12"
+        type: string
+
+jobs:
+  translate:
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    if: ${{ matrix.shard < fromJSON(inputs.workers) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Translate shard
+        run: node scripts/translate-worker.mjs
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.workers }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
