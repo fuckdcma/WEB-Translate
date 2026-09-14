@@ -7,6 +7,7 @@ let runs=[];
 let activeFilter='all';
 let toastTimer;
 let trackerTimer;
+let quotaMonitorTimer;
 let trackedProjectId=null;
 let editState=null;
 let modelState={selected:'',models:[]};
@@ -14,7 +15,7 @@ let modelState={selected:'',models:[]};
 function showToast(message,isError=false){clearTimeout(toastTimer);toast.textContent=message;toast.classList.toggle('error',isError);toast.classList.add('show');toastTimer=setTimeout(()=>toast.classList.remove('show'),3200)}
 async function request(url,options){const response=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||`Yêu cầu thất bại (${response.status})`);return data}
 function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
-function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations();if(id==='models')loadModels()}
+function activateTab(id){$$('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.tab-page').forEach(x=>x.classList.toggle('active',x.id===id));$('#pageTitle').textContent=titles[id];history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'smooth'});if(id==='api')loadIntegrations();clearInterval(quotaMonitorTimer);quotaMonitorTimer=null;if(id==='models'){loadModels();quotaMonitorTimer=setInterval(()=>loadQuotaMonitor(false),90_000)}}
 $$('[data-tab]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
 $$('[data-tab-jump]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tabJump)));
 const startTab=location.hash.slice(1);if(titles[startTab])activateTab(startTab);
@@ -85,8 +86,14 @@ function renderModels(){
   $$('[data-model-id]').forEach(button=>button.onclick=()=>chooseModel(button.dataset.modelId,button));
   $$('[data-fallback-id]').forEach(button=>button.onclick=()=>toggleFallback(button.dataset.fallbackId,button));
 }
-async function loadModels(){const list=$('#modelList');list.innerHTML='<div class="model-loading"><i></i><strong>Đang lấy danh sách model từ Google...</strong></div>';try{modelState=await request('/api/models');renderModels()}catch(error){list.innerHTML=`<div class="model-empty"><span>!</span><strong>Không thể tải model</strong><p>${escapeHtml(error.message)}</p></div>`;showToast(error.message,true)}}
-async function chooseModel(modelId,button){button.disabled=true;button.textContent='Đang lưu...';try{modelState=await request('/api/models',{method:'PUT',body:JSON.stringify({action:'select',model:modelId})});renderModels();$('#googleModel').textContent=modelState.selected;showToast(`Đã chọn ${modelState.selected} làm model chính`)}catch(error){button.disabled=false;button.textContent='Chọn chính';showToast(error.message,true)}}
+function quotaValue(value){const number=Number(value);if(!Number.isFinite(number))return'—';if(number>=1_000_000)return`${Math.round(number/100_000)/10}M`;if(number>=1_000)return`${Math.round(number/100)/10}K`;return number.toLocaleString('vi-VN')}
+function renderQuotaMonitor(data){
+  const status=$('#monitorStatus');status.className=`monitor-status ${data.status||'waiting'}`;status.textContent=data.status==='connected'?'✓ Đã đối chứng':data.status==='stale'?'Dữ liệu Google đang trễ':data.status==='setup_required'?'Chờ cấp quyền':data.status==='error'?'Chưa đọc được':'Đang chờ dữ liệu';$('#monitorMessage').textContent=data.message||data.error||'Đang lấy dữ liệu đối chứng';$('#monitorProject').textContent=data.projectId||'—';$('#monitorSynced').textContent=data.syncedAt?new Date(data.syncedAt).toLocaleTimeString('vi-VN'):'—';$('#monitorObserved').textContent=data.newestAt?new Date(data.newestAt).toLocaleTimeString('vi-VN'):'—';$('#monitorLag').textContent=Number.isFinite(Number(data.lagSeconds))?`${Number(data.lagSeconds)} giây`:'—';
+  for(const dimension of ['rpm','tpm','rpd']){const key=dimension[0].toUpperCase()+dimension.slice(1);const item=data.comparison?.[dimension]||{};const local=Number(item.internal)||0;const google=item.google===null||item.google===undefined?null:Number(item.google);const limit=item.limit===null||item.limit===undefined?null:Number(item.limit);$(`#local${key}`).textContent=quotaValue(local);$(`#google${key}`).textContent=google===null?'—':quotaValue(google);$(`#${dimension}CompareBar`).style.width=`${Math.min(100,Math.max(0,Number(item.internalPercent)||0))}%`;const difference=$(`#${dimension}Difference`);if(google===null){difference.textContent='Đang chờ số Google';difference.className=''}else{const gap=local-google;difference.textContent=`Chênh ${gap>0?'+':''}${quotaValue(gap)}${limit?` · giới hạn ${quotaValue(limit)}`:''}`;difference.className=Math.abs(gap)>Math.max(2,google*.25)?'warn':'match'}}
+}
+async function loadQuotaMonitor(force=false){const button=$('#refreshQuotaMonitor');if(force){button.disabled=true;button.textContent='Đang đồng bộ...'}try{const model=modelState.selected?`&model=${encodeURIComponent(modelState.selected)}`:'';const data=await request(`/api/quota-monitor?refresh=${force?'1':'0'}${model}`);renderQuotaMonitor(data)}catch(error){renderQuotaMonitor({status:'error',error:error.message,message:error.message})}finally{if(force){button.disabled=false;button.textContent='Đồng bộ ngay'}}}
+async function loadModels(){const list=$('#modelList');list.innerHTML='<div class="model-loading"><i></i><strong>Đang lấy danh sách model từ Google...</strong></div>';try{modelState=await request('/api/models');renderModels();await loadQuotaMonitor(false)}catch(error){list.innerHTML=`<div class="model-empty"><span>!</span><strong>Không thể tải model</strong><p>${escapeHtml(error.message)}</p></div>`;showToast(error.message,true)}}
+async function chooseModel(modelId,button){button.disabled=true;button.textContent='Đang lưu...';try{modelState=await request('/api/models',{method:'PUT',body:JSON.stringify({action:'select',model:modelId})});renderModels();await loadQuotaMonitor(true);$('#googleModel').textContent=modelState.selected;showToast(`Đã chọn ${modelState.selected} làm model chính`)}catch(error){button.disabled=false;button.textContent='Chọn chính';showToast(error.message,true)}}
 async function toggleFallback(modelId,button){button.disabled=true;try{modelState=await request('/api/models',{method:'PUT',body:JSON.stringify({action:'fallback',model:modelId,enabled:!modelState.fallbacks?.includes(modelId)})});renderModels();showToast('Đã cập nhật model dự phòng')}catch(error){button.disabled=false;showToast(error.message,true)}}
 async function saveQuota(event){event.preventDefault();const button=$('#saveQuota');button.disabled=true;button.textContent='Đang lưu...';try{modelState=await request('/api/models',{method:'PUT',body:JSON.stringify({action:'quota',model:modelState.selected,rpm:Number($('#quotaRpm').value),tpm:Number($('#quotaTpm').value),rpd:Number($('#quotaRpd').value),reservePercent:Number($('#quotaReserve').value)})});renderModels();showToast('Đã lưu giới hạn an toàn cho model')}catch(error){showToast(error.message,true)}finally{button.disabled=false;button.textContent='Lưu giới hạn model'}}
 
@@ -168,6 +175,7 @@ $('#projectSearch').addEventListener('input',renderProjects);
 $('#refreshRuns').addEventListener('click',loadRuns);
 $('#refreshIntegrations').addEventListener('click',loadIntegrations);
 $('#refreshModels').addEventListener('click',loadModels);
+$('#refreshQuotaMonitor').addEventListener('click',()=>loadQuotaMonitor(true));
 $('#quotaForm').addEventListener('submit',saveQuota);
 $$('.restore').forEach(button=>button.addEventListener('click',()=>showToast('Khôi phục phiên bản được quản lý bởi GitHub')));
 
