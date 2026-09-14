@@ -1,4 +1,4 @@
-import {allowMethods,readProjects,readProjectStatus,send} from './_shared.js';
+import {allowMethods,readDatasetJson,readProjects,readProjectStatus,send} from './_shared.js';
 
 const step=(id,label,status,detail)=>({id,label,status,detail});
 
@@ -11,10 +11,11 @@ export default async function handler(req,res){
     const project=projects.find(item=>item.id===projectId);
     if(!project)return send(res,404,{error:'Không tìm thấy dự án'});
 
-    const [created,dispatch,review]=await Promise.all([
+    const [created,dispatch,review,completedReport]=await Promise.all([
       readProjectStatus(projectId,'project'),
       readProjectStatus(projectId,'dispatch'),
-      readProjectStatus(projectId,'review')
+      readProjectStatus(projectId,'review'),
+      readDatasetJson(`results/${projectId}/review.json`)
     ]);
     const workers=Math.min(16,Math.max(0,Number(dispatch?.workers)||0));
     const storedShards=workers?await Promise.all(Array.from({length:workers},(_,index)=>readProjectStatus(projectId,`shard-${index}`))):[];
@@ -34,8 +35,11 @@ export default async function handler(req,res){
     const reviewState=currentReview?.status||'waiting';
     const hasPause=summary.paused>0||reviewState==='paused';
     const hasFailure=summary.failed>0||reviewState==='failed';
-    const isComplete=translationComplete&&reviewState==='completed';
-    const reviewPercent=Math.max(0,Math.min(100,Number(currentReview?.progress)||0));
+    const archivedComplete=Number(completedReport?.checkedRows)>=Number(project.totalRows)&&Number(project.totalRows)>0;
+    if(archivedComplete)processedRows=Number(project.totalRows);
+    const isComplete=archivedComplete||(translationComplete&&reviewState==='completed');
+    const effectiveReview=archivedComplete?{status:'completed',progress:100,checkedRows:Number(completedReport.checkedRows),issueCount:Number(completedReport.issueCount)||0,completedAt:completedReport.completedAt,restored:true}:currentReview;
+    const reviewPercent=isComplete?100:Math.max(0,Math.min(100,Number(currentReview?.progress)||0));
     const progress=isComplete?100:reviewState==='running'||reviewState==='paused'?Math.min(99,85+Math.round(reviewPercent*.14)):dispatch?Math.min(85,20+Math.round(translationPercent*.65)):created?15:0;
     const state=isComplete?'done':hasFailure?'failed':hasPause?'paused':'working';
     const currentStage=isComplete?'Hoàn thành':hasFailure?'Cần kiểm tra':hasPause?'Tạm dừng — tiến độ đã được lưu':reviewState==='running'?'Đang kiểm tra bản dịch':translationComplete?'Đang chờ kiểm tra':summary.running+summary.completed>0?'Đang dịch và lưu từng chặng':dispatch?'Đang chờ phiên xử lý':'Đã khởi tạo';
@@ -45,10 +49,10 @@ export default async function handler(req,res){
       step('store','Lưu dữ liệu',created?.stored?'complete':created?'active':'waiting',created?.stored?'Đã lưu an toàn':'Đang chờ'),
       step('create','Khởi tạo dự án',created?'complete':'waiting',created?'Đã tạo hồ sơ dự án':'Đang chờ'),
       step('dispatch','Xếp lịch xử lý',dispatch?'complete':'waiting',dispatch?`${workers} phiên tiết kiệm lượt Google`:'Chưa khởi chạy'),
-      step('translate','Dịch và lưu từng chặng',summary.failed?'error':summary.paused?'paused':translationComplete?'complete':dispatch?'active':'waiting',workers?`${processedRows}/${Number(project.totalRows)||0} dòng đã lưu · ${summary.completed}/${workers} phiên hoàn tất`:'Đang chờ'),
-      step('review','Kiểm tra bản dịch',reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',reviewState==='completed'?`${Number(currentReview.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='paused'?`${Number(currentReview.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
+      step('translate','Dịch và lưu từng chặng',isComplete?'complete':summary.failed?'error':summary.paused?'paused':translationComplete?'complete':dispatch?'active':'waiting',workers?`${processedRows}/${Number(project.totalRows)||0} dòng đã lưu · ${summary.completed}/${workers} phiên hoàn tất`:'Đã lưu bản dịch hoàn chỉnh'),
+      step('review','Kiểm tra bản dịch',isComplete?'complete':reviewState==='failed'?'error':reviewState==='paused'?'paused':reviewState==='completed'?'complete':translationComplete||reviewState==='running'?'active':'waiting',isComplete?`${Number(effectiveReview.checkedRows||0).toLocaleString('vi-VN')} dòng đã kiểm tra`:reviewState==='paused'?`${Number(currentReview.checkedRows||0)} dòng đã kiểm tra và lưu`:reviewState==='running'?`${reviewPercent}% đã kiểm tra`:'Đang chờ hoàn tất bản dịch'),
       step('complete','Hoàn tất dự án',isComplete?'complete':hasFailure?'error':hasPause?'paused':'waiting',isComplete?'Có thể tải kết quả':hasPause?pausedMessage:'Đang chờ')
     ];
-    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers,summary,shards:shards.map((item,index)=>item||{index,status:'pending'}),review:currentReview,steps,updatedAt:new Date().toISOString()});
+    send(res,200,{project:{...project,progress,status:state,translatedRows:processedRows},state,currentStage,progress,workers,summary,shards:shards.map((item,index)=>item||{index,status:'pending'}),review:effectiveReview,steps,updatedAt:new Date().toISOString()});
   }catch(error){send(res,500,{error:error.message})}
 }
