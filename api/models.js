@@ -2,7 +2,7 @@ import {allowMethods,envState,readDatasetJson,saveDatasetFiles,send} from './_sh
 
 const configPath='config/google-ai.json';
 const normalizeModel=name=>String(name||'').replace(/^models\//,'');
-const excluded=/embedding|aqa|imagen|image|tts|audio|live|robotics|computer-use|deep-research/i;
+const excluded=/embedding|aqa|imagen|image|tts|audio|live|robotics|computer-use|deep-research|transcribe|customtools/i;
 
 function modelProfile(id){
   if(/lite/i.test(id))return{score:94,speed:'Rất nhanh',tone:'fast'};
