@@ -60,6 +60,10 @@ export class QuotaRouter{
         gate.ensureDaily();
         const inputTokens=await countGoogleTokens({prompt,model});
         await gate.reserve(inputTokens);
+        // Persist the reservation before generation so a terminated runner cannot
+        // forget an in-flight request and accidentally reuse the same quota.
+        await uploadWithRetry([gate.file()]);
+        gate.dirty=false;
         const response=await requestGoogle({prompt,temperature,label,model,attemptLimit:1});
         gate.complete(response.usage);
         return{...response,model,inputTokens,quota:gate.limits};
