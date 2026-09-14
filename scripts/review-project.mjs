@@ -33,6 +33,8 @@ async function main(){
     const rows=[];
     const missingShards=[];
     for(let index=0;index<shardCount;index+=1){
+      const shardStatus=await readJson(`status/${projectId}/shard-${index}.json`);
+      if(shardStatus?.runId!==runId||shardStatus?.status!=='completed'){missingShards.push(index);continue}
       const response=await readFile(`results/${projectId}/shard-${index}.tsv`);
       if(!response){missingShards.push(index);continue}
       const lines=(await response.text()).trim().split(/\r?\n/);
