@@ -29,6 +29,7 @@ export default async function handler(req,res){
     const update=describe(typeof req.body==='string'?JSON.parse(req.body||'{}'):(req.body||{}));const occurredAt=new Date().toISOString();
     const event={...update,tool:req.body?.tool_call?.name||null,occurredAt};
     const next={...run,...update,status:update.status||'in_progress',currentFile:run.sourceFile,environmentId:req.body?.environment_id||run.environmentId,updatedAt:occurredAt,events:[event,...(run.events||[])].slice(0,30)};
+    if(run.probe&&!update.status){next.status='completed';next.stage='completed';next.detail='Hook đã gửi trạng thái trực tiếp thành công';next.completedAt=occurredAt}
     if(update.stage==='reviewing'){
       next.status='completed';next.stage='completed';next.detail='Đã dịch và kiểm tra hoàn tất';next.completedAt=occurredAt;
       if(next.triggerId)try{await geminiPlatform(`/triggers/${encodeURIComponent(next.triggerId)}`,{method:'PATCH',body:JSON.stringify({status:'paused'})});next.triggerStatus='paused'}catch(error){next.warning=error.message}

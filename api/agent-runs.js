@@ -102,9 +102,13 @@ async function createRun(req,project){
   return run;
 }
 
-async function probe(){
-  const interaction=await geminiPlatform('/interactions',{method:'POST',body:JSON.stringify({agent,input:[{type:'text',text:'Return exactly READY. Do not call tools.'}],environment:'remote',background:true,agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:5000}})});
-  return {ok:true,agent,model:runnerModel,interactionId:interaction.id,status:interaction.status||'queued'};
+async function probe(req){
+  const runId=`agent-hook-check-${Date.now()}`;const createdAt=now();const project={id:'system-hook-check'};const origin=publicOrigin(req);const host=new URL(origin).host;
+  let run={id:runId,projectId:project.id,name:'Kiểm tra Google Agent Hooks',sourceFile:'system-check',currentFile:'system-check',probe:true,provider:'google-agent-hooks',status:'queued',stage:'preparing',detail:'Đang kiểm tra Hook trực tiếp',createdAt,updatedAt:createdAt,events:[]};
+  await writeAgentRun(run,{addToIndex:true});
+  const environment={type:'remote',sources:[{type:'inline',target:'.agents/hooks.json',content:hookConfig(origin,runId,project.id)}],network:{allowlist:[{domain:host,transform:{Authorization:`Bearer ${process.env.AGENT_HOOK_SECRET||process.env.QUOTA_MONITOR_INGEST_SECRET}`}}]}};
+  try{const interaction=await geminiPlatform('/interactions',{method:'POST',body:JSON.stringify({agent,input:[{type:'text',text:'Use code_execution exactly once to run `printf AGENT_HOOK_READY`, then finish.'}],tools:[{type:'code_execution'}],environment,background:true,agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:5000}})});run={...run,interactionId:interaction.id,status:'in_progress',stage:'starting',detail:'Đang chờ sự kiện Hook từ Google',updatedAt:now()};await writeAgentRun(run);return {ok:true,run}}
+  catch(error){run={...run,status:'failed',stage:'failed',detail:'Kiểm tra Hook thất bại',error:error.message,updatedAt:now()};await writeAgentRun(run);throw error}
 }
 
 export default async function handler(req,res){
@@ -116,12 +120,12 @@ export default async function handler(req,res){
       return send(res,200,{runs});
     }
     const body=typeof req.body==='string'?JSON.parse(req.body||'{}'):(req.body||{});
-    if(body.action==='probe')return send(res,200,await probe());
+    if(body.action==='probe')return send(res,200,await probe(req));
     if(body.action==='cancel'){
       const run=await readAgentRun(body.runId);if(!run)return send(res,404,{error:'Không tìm thấy phiên chạy'});
       if(run.interactionId)await geminiPlatform(`/interactions/${encodeURIComponent(run.interactionId)}:cancel`,{method:'POST',body:'{}'});
       if(run.triggerId)await geminiPlatform(`/triggers/${encodeURIComponent(run.triggerId)}`,{method:'PATCH',body:JSON.stringify({status:'paused'})});
-      const cancelled={...run,status:'cancelled',stage:'cancelled',detail:'Đã dừng',updatedAt:now()};await writeAgentRun(cancelled);return send(res,200,{run:cancelled});
+      const cancelled={...run,status:'cancelled',stage:'cancelled',detail:'Đã dừng',triggerStatus:run.triggerId?'paused':run.triggerStatus,updatedAt:now()};await writeAgentRun(cancelled);return send(res,200,{run:cancelled});
     }
     if(!envState().agentHooks)return send(res,400,{error:'Google Agent Hooks chưa được cấu hình đầy đủ trên Vercel'});
     if(!validId(body.projectId))return send(res,400,{error:'Mã dự án không hợp lệ'});
