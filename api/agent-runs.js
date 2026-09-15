@@ -99,7 +99,7 @@ async function createRun(req,project){
 }
 
 async function probe(){
-  const interaction=await geminiPlatform('/interactions',{method:'POST',body:JSON.stringify({agent,input:[{type:'text',text:'Return exactly READY. Do not call tools.'}],background:true,agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:5000}})});
+  const interaction=await geminiPlatform('/interactions',{method:'POST',body:JSON.stringify({agent,input:[{type:'text',text:'Return exactly READY. Do not call tools.'}],environment:'remote',background:true,agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:5000}})});
   return {ok:true,agent,model:runnerModel,interactionId:interaction.id,status:interaction.status||'queued'};
 }
 
