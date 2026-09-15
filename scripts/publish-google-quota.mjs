@@ -9,7 +9,9 @@ const endpoint=process.env.QUOTA_MONITOR_ENDPOINT||'https://web-translate-five.v
 const gcloud=process.env.GCLOUD_PATH||join(process.env.LOCALAPPDATA||'', 'Google','Cloud SDK','google-cloud-sdk','bin','gcloud.cmd');
 const secretFile=process.env.QUOTA_MONITOR_SECRET_FILE||join(process.env.LOCALAPPDATA||'', 'WEBTranslate','quota-monitor-secret.txt');
 
-const accessToken=execFileSync(gcloud,['auth','print-access-token'],{encoding:'utf8',windowsHide:true}).trim();
+let accessToken=String(process.env.GOOGLE_CLOUD_ACCESS_TOKEN||'').trim();
+if(!accessToken&&process.platform!=='win32')accessToken=execFileSync(gcloud,['auth','print-access-token'],{encoding:'utf8',windowsHide:true}).trim();
+if(!accessToken&&process.platform==='win32')throw new Error('Hãy chạy publish-google-quota.ps1 trên Windows');
 if(!accessToken)throw new Error('Google chưa đăng nhập trên máy');
 process.env.GOOGLE_CLOUD_PROJECT_ID=projectId;process.env.GOOGLE_CLOUD_PROJECT_NUMBER=projectNumber;process.env.GOOGLE_CLOUD_ACCESS_TOKEN=accessToken;
 const [secret,snapshot]=await Promise.all([readFile(secretFile,'utf8').then(value=>value.trim()),fetchGoogleQuotaSnapshot()]);
