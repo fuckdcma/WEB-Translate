@@ -8,10 +8,10 @@ function sameSecret(actual,expected){
   return left.length===right.length&&left.length>0&&timingSafeEqual(left,right);
 }
 
-function numberOrNull(value){const number=Number(value);return Number.isFinite(number)?number:null}
-function cleanDimension(value={}){return{usage:numberOrNull(value.usage),limit:numberOrNull(value.limit),exceeded:numberOrNull(value.exceeded)||0,observedAt:value.observedAt||null,metric:String(value.metric||'').slice(0,180)||null}}
+function numberOrNull(value){if(value===null||value===undefined||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null}
+function cleanDimension(value={}){return{usage:numberOrNull(value.usage),peakUsage:numberOrNull(value.peakUsage),todayUsage:numberOrNull(value.todayUsage),limit:numberOrNull(value.limit),limitSource:String(value.limitSource||'').slice(0,40)||null,exceeded:numberOrNull(value.exceeded)||0,observedAt:value.observedAt||null,metric:String(value.metric||'').slice(0,180)||null}}
 function cleanSnapshot(value={}){
-  const models={};for(const [name,data] of Object.entries(value.models||{})){const model=String(name).replace(/^models\//,'').replace(/[^a-z0-9._-]+/gi,'-').slice(0,100);if(!model)continue;models[model]={rpm:cleanDimension(data?.rpm),tpm:cleanDimension(data?.tpm),rpd:cleanDimension(data?.rpd)}}
+  const models={};for(const [name,data] of Object.entries(value.models||{})){const model=String(name).replace(/^models\//,'').replace(/[^a-z0-9._-]+/gi,'-').slice(0,100);if(!model)continue;models[model]={rpm:cleanDimension(data?.rpm),tpm:cleanDimension(data?.tpm),rpd:cleanDimension(data?.rpd),tpd:cleanDimension(data?.tpd)}}
   return{version:1,projectId:String(value.projectId||''),projectNumber:String(value.projectNumber||''),syncedAt:value.syncedAt||new Date().toISOString(),receivedAt:new Date().toISOString(),newestAt:value.newestAt||null,lagSeconds:numberOrNull(value.lagSeconds),models,sources:{monitoringSeries:numberOrNull(value.sources?.monitoringSeries)||0,monitoringMetricTypes:numberOrNull(value.sources?.monitoringMetricTypes)||0,serviceUsageBuckets:numberOrNull(value.sources?.serviceUsageBuckets)||0},errors:value.errors&&typeof value.errors==='object'?value.errors:{}};
 }
 

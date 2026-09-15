@@ -39,13 +39,13 @@ async function googleJson(url,token){
 }
 
 function dimensionFor(type,limitName=''){
-  if(/input_token_count/i.test(type))return'tpm';
+  if(/input_token_count/i.test(type))return/day|daily|per.?day/i.test(limitName)?'tpd':'tpm';
   if(!/requests/i.test(type))return null;
   return/day|daily|per.?day/i.test(limitName)?'rpd':'rpm';
 }
 
-function blankDimension(){return{usage:null,limit:null,exceeded:0,observedAt:null,metric:null}}
-function blankModel(){return{rpm:blankDimension(),tpm:blankDimension(),rpd:blankDimension()}}
+function blankDimension(){return{usage:null,peakUsage:null,todayUsage:null,limit:null,limitSource:null,exceeded:0,observedAt:null,metric:null}}
+function blankModel(){return{rpm:blankDimension(),tpm:blankDimension(),rpd:blankDimension(),tpd:blankDimension()}}
 
 function summarizeTimeSeries(series=[]){
   const models={};const today=pacificDay(Date.now());let newest=0;
@@ -54,28 +54,18 @@ function summarizeTimeSeries(series=[]){
     const labels=item.metric?.labels||{};const model=normalizeModel(labels.model);const dimension=dimensionFor(type,labels.limit_name);if(!dimension)continue;
     const target=models[model]||(models[model]=blankModel());const cell=target[dimension];const points=Array.isArray(item.points)?item.points:[];if(!points.length)continue;
     const dated=points.map(point=>({at:Date.parse(point.interval?.endTime||point.interval?.startTime||0),value:numberValue(point.value)})).filter(point=>Number.isFinite(point.at)).sort((a,b)=>b.at-a.at);if(!dated.length)continue;
-    newest=Math.max(newest,dated[0].at);cell.metric=type;cell.observedAt=new Date(Math.max(Date.parse(cell.observedAt||0)||0,dated[0].at)).toISOString();
-    if(kind==='limit')cell.limit=Math.max(Number(cell.limit)||0,...dated.map(point=>point.value));
-    else if(kind==='exceeded')cell.exceeded=Number(cell.exceeded||0)+dated.filter(point=>pacificDay(point.at)===today).reduce((sum,point)=>sum+point.value,0);
-    else if(dimension==='rpd')cell.usage=(Number(cell.usage)||0)+dated.filter(point=>pacificDay(point.at)===today).reduce((sum,point)=>sum+point.value,0);
-    else cell.usage=(Number(cell.usage)||0)+dated[0].value;
-  }
-  return{models,newestAt:newest?new Date(newest).toISOString():null};
-}
-
-function summarizeServiceUsage(metrics=[]){
-  const models={};let matched=0;
-  for(const metric of metrics){
-    const text=`${metric.metric||''} ${metric.displayName||''}`;if(!/generate.?content/i.test(text)||!/request|input.?token/i.test(text))continue;
-    for(const limit of metric.consumerQuotaLimits||[]){
-      const dimension=/input.?token/i.test(text)?'tpm':/\/d\//i.test(limit.unit||'')||/day/i.test(limit.name||'')?'rpd':'rpm';
-      for(const bucket of limit.quotaBuckets||[]){
-        const model=normalizeModel(bucket.dimensions?.model||bucket.dimensions?.model_id||'all');const value=Number(bucket.effectiveLimit??bucket.defaultLimit??0);if(!(value>0))continue;
-        const target=models[model]||(models[model]={});target[dimension]=Math.max(Number(target[dimension])||0,value);matched+=1;
-      }
+    const todayPoints=dated.filter(point=>pacificDay(point.at)===today);cell.metric=type;
+    if(kind==='limit'){cell.limit=Math.max(Number(cell.limit)||0,...dated.map(point=>point.value));cell.limitSource='cloud_monitoring'}
+    else if(kind==='exceeded')cell.exceeded=Number(cell.exceeded||0)+todayPoints.reduce((sum,point)=>sum+point.value,0);
+    else{
+      newest=Math.max(newest,dated[0].at);cell.observedAt=new Date(Math.max(Date.parse(cell.observedAt||0)||0,dated[0].at)).toISOString();
+      const todayUsage=todayPoints.reduce((sum,point)=>sum+point.value,0);const peakUsage=todayPoints.length?Math.max(...todayPoints.map(point=>point.value)):0;
+      cell.todayUsage=Number(cell.todayUsage||0)+todayUsage;cell.peakUsage=Math.max(Number(cell.peakUsage)||0,peakUsage);
+      if(dimension==='rpd'||dimension==='tpd')cell.usage=Number(cell.usage||0)+todayUsage;
+      else cell.usage=Number(cell.usage||0)+dated[0].value;
     }
   }
-  return{models,matched};
+  return{models,newestAt:newest?new Date(newest).toISOString():null};
 }
 
 async function metricTypes(projectId,token){
@@ -98,27 +88,12 @@ async function monitoringSnapshot(projectId,token){
   return{...summarizeTimeSeries(all),metricTypes:types,length:all.length};
 }
 
-async function serviceUsageSnapshot(projectNumber,token){
-  if(!projectNumber)return{models:{},matched:0,unavailable:'Thiếu mã số project'};
-  const base=`https://serviceusage.googleapis.com/v1beta1/projects/${encodeURIComponent(projectNumber)}/services/generativelanguage.googleapis.com/consumerQuotaMetrics`;
-  const metrics=[];let pageToken='';
-  do{const params=new URLSearchParams({view:'FULL',pageSize:'200'});if(pageToken)params.set('pageToken',pageToken);const payload=await googleJson(`${base}?${params}`,token);metrics.push(...(payload.metrics||[]));pageToken=payload.nextPageToken||''}while(pageToken);
-  return summarizeServiceUsage(metrics);
-}
-
-function mergeLimits(monitoring,serviceUsage){
-  const models=structuredClone(monitoring.models||{});
-  for(const [model,limits] of Object.entries(serviceUsage.models||{})){const target=models[model]||(models[model]=blankModel());for(const dimension of ['rpm','tpm','rpd'])if(Number(limits[dimension])>0)target[dimension].limit=Number(limits[dimension])}
-  return models;
-}
-
 export function googleCloudMonitorConfigured(){return Boolean(process.env.GOOGLE_CLOUD_PROJECT_ID&&(process.env.GOOGLE_CLOUD_ACCESS_TOKEN||process.env.GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON||process.env.GOOGLE_SERVICE_ACCOUNT_JSON))}
 
 export async function fetchGoogleQuotaSnapshot(){
   const projectId=process.env.GOOGLE_CLOUD_PROJECT_ID;const projectNumber=process.env.GOOGLE_CLOUD_PROJECT_NUMBER||credentials()?.project_number;
-  if(!projectId)throw new Error('Chưa cấu hình GOOGLE_CLOUD_PROJECT_ID');const token=await accessToken();const errors={};let monitoring={models:{},metricTypes:[],length:0,newestAt:null};let serviceUsage={models:{},matched:0};
+  if(!projectId)throw new Error('Chưa cấu hình GOOGLE_CLOUD_PROJECT_ID');const token=await accessToken();const errors={};let monitoring={models:{},metricTypes:[],length:0,newestAt:null};
   try{monitoring=await monitoringSnapshot(projectId,token)}catch(error){errors.monitoring=error.message}
-  try{serviceUsage=await serviceUsageSnapshot(projectNumber,token)}catch(error){errors.serviceUsage=error.message}
-  if(errors.monitoring&&errors.serviceUsage)throw new Error(`${errors.monitoring}; ${errors.serviceUsage}`);
-  return{version:1,projectId,projectNumber:projectNumber||null,syncedAt:new Date().toISOString(),newestAt:monitoring.newestAt,lagSeconds:monitoring.newestAt?Math.max(0,Math.round((Date.now()-Date.parse(monitoring.newestAt))/1000)):null,models:mergeLimits(monitoring,serviceUsage),sources:{monitoringSeries:monitoring.length,monitoringMetricTypes:monitoring.metricTypes.length,serviceUsageBuckets:serviceUsage.matched},errors};
+  if(errors.monitoring)throw new Error(errors.monitoring);
+  return{version:1,projectId,projectNumber:projectNumber||null,syncedAt:new Date().toISOString(),newestAt:monitoring.newestAt,lagSeconds:monitoring.newestAt?Math.max(0,Math.round((Date.now()-Date.parse(monitoring.newestAt))/1000)):null,models:monitoring.models,sources:{monitoringSeries:monitoring.length,monitoringMetricTypes:monitoring.metricTypes.length,serviceUsageBuckets:0},errors};
 }
