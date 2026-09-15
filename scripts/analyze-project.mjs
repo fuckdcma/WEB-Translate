@@ -21,7 +21,7 @@ async function main(){
     const config=manifest.googleConfig||await readJson('config/google-ai.json')||{model:googleModel};const router=await createQuotaRouter({config,primary:googleModel});
     const paths=await listPaths(`checkpoints/${projectId}/analysis/`);const records=await readMany(paths);const entries=new Map();
     for(const record of records)if(record?.sourceHash===manifest.sourceHash)for(const item of record.entries||[])if(Number(item.id)>0)entries.set(Number(item.id),item);
-    let pending=items.filter(item=>!entries.has(item.id));let queue=compactBatches(pending,{tokenBudget:router.batchTokenBudget(),maxRows:router.batchRowLimit(),serialize:item=>`${item.id}\t${item.text}`});
+    let pending=items.filter(item=>!entries.has(item.id));let queue=compactBatches(pending,{tokenBudget:router.batchTokenBudget(),maxRows:router.batchRowLimit(400),serialize:item=>`${item.id}\t${item.text}`});
     await uploadWithRetry([statusFile('running',{model:googleModel,processedRows:entries.size,totalRows:items.length,batches:queue.length,message:'Đang phân loại và tạo thuật ngữ cố định'})]);
     while(queue.length){
       const batch=queue.shift();const compact=batch.map(item=>`${item.id}\t${item.text.replace(/[\r\n\t]+/g,' ')}`).join('\n');
@@ -37,7 +37,7 @@ ${compact}`;
         const complete=accepted===batch.length;const name=`analysis-${String(batch[0].id).padStart(6,'0')}-${String(batch.at(-1).id).padStart(6,'0')}.json`;await uploadWithRetry([jsonFile(`checkpoints/${projectId}/analysis/${name}`,{version:1,projectId,runId,sourceHash:manifest.sourceHash,model:response.model,entries:batchEntries,complete,updatedAt:new Date().toISOString()}),...router.files(),statusFile('running',{model:response.model,processedRows:entries.size,totalRows:items.length,message:`Đã phân loại ${entries.size}/${items.length} dòng`})]);
         const missing=batch.filter(item=>!entries.has(item.id));if(missing.length)queue.unshift(...compactBatches(missing,{tokenBudget:Math.max(500,Math.floor(router.batchTokenBudget()/2)),maxRows:Math.max(10,Math.min(router.batchRowLimit(),Math.floor(batch.length/2))),serialize:item=>`${item.id}\t${item.text}`}));
       }catch(error){
-        if(error instanceof GooglePauseError&&error.reason==='batch_too_large'&&batch.length>1){const middle=Math.ceil(batch.length/2);queue.unshift(batch.slice(middle),batch.slice(0,middle));continue}
+        if(batch.length>10&&(!(error instanceof GooglePauseError)||error.reason==='batch_too_large')){const middle=Math.ceil(batch.length/2);console.warn(`Analysis batch ${batch.length} rows was not accepted; retrying as ${middle} + ${batch.length-middle}.`);queue.unshift(batch.slice(middle),batch.slice(0,middle));continue}
         const pausedAt=new Date().toISOString();await uploadWithRetry([...router.files(),statusFile('paused',{model:error.model||googleModel,processedRows:entries.size,totalRows:items.length,pauseReason:error.reason||'invalid_response',message:error.message,pausedAt}),...(error.quota?[jsonFile(`status/${projectId}/quota.json`,{runId,model:error.model||googleModel,reason:error.reason||'rate_limit',quota:error.quota,message:error.message,pausedAt,stage:'analysis'})]:[])]);await setReady(false);console.warn(error.message);return;
       }
     }

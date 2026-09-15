@@ -50,7 +50,7 @@ export class QuotaRouter{
   constructor(config,primary){this.config=config||{};this.models=[primary,...(this.config.fallbacks||[])].filter((item,index,list)=>item&&list.indexOf(item)===index);this.gates=new Map();this.extraFiles=[]}
   limitsFor(model){return usableLimits(this.config.limits?.[model]||{})}
   batchTokenBudget(){const limits=this.limitsFor(this.models[0]);return Math.max(500,Math.min(24_000,Math.floor(limits.usableTpm*.45)))}
-  batchRowLimit(){return Math.floor(clamp(this.config.batchRows||50,10,50))}
+  batchRowLimit(defaultRows=1_000){return Math.floor(clamp(this.config.batchRows||defaultRows,10,1_000))}
   async gate(model){if(this.gates.has(model))return this.gates.get(model);const day=pacificDay(Date.now());const [ledger,detected]=await Promise.all([readJson(`usage/google/${day}/${safeName(model)}.json`),readJson(`usage/google/limits/${safeName(model)}.json`)]);const saved=this.config.limits?.[model]||{};const profile={rpm:saved.rpm||detected?.rpm,tpm:saved.tpm||detected?.tpm,rpd:saved.rpd||detected?.rpd,reservePercent:saved.reservePercent||20,source:saved.source||detected?.source};const gate=new QuotaGate(model,profile,ledger);gate.refreshDay();this.gates.set(model,gate);return gate}
   files(){return[...this.gates.values()].filter(gate=>gate.dirty).map(gate=>gate.file()).concat(this.extraFiles)}
   async generate({prompt,temperature=.1,label='Google AI'}){
