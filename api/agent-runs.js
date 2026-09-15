@@ -17,7 +17,8 @@ function publicOrigin(req){
 function runPrompt(project,runId){
   const repo=process.env.HF_DATASET_REPO;
   const env=`PROJECT_ID=${project.id} RUN_ID=${runId} WORKER_COUNT=1 WORKER_INDEX=0 HF_DATASET_REPO=${repo} HF_TOKEN=proxy-managed GEMINI_API_KEY=proxy-managed`;
-  return `You are the background localization runner for project ${project.id}. Work only in /workspace/repo. Resume from the checkpoints already stored in Hugging Face; never restart completed work. Run these commands one at a time with code_execution and wait for each to finish:\n1. corepack pnpm install --frozen-lockfile\n2. ${env} node scripts/coordinate-project.mjs\n3. ${env} node scripts/analyze-project.mjs\n4. ${env} node scripts/translate-worker.mjs\n5. ${env} node scripts/review-project.mjs\nIf a script reports quota pause, checkpoint pause, or no work, stop successfully so the next scheduled execution can resume. Do not edit source code and do not expose credentials. Source file: ${project.fileName||'unknown'}.`;
+  const command=`cd /workspace/repo && corepack pnpm install --frozen-lockfile && env ${env} node scripts/run-agent-pipeline.mjs`;
+  return `You are a deterministic background job launcher. Do not inspect, read, list, edit, explain, browse, or analyze any file. Call code_execution exactly once with this exact bash command and no changes: ${command}\nWait for that tool call to finish, then stop. The script owns checkpoints and safely exits when quota must wait. Source file: ${project.fileName||'unknown'}.`;
 }
 
 function hookConfig(origin,runId,projectId){
@@ -88,7 +89,7 @@ async function createRun(req,project){
   const createdAt=now();
   let run={id:runId,projectId:project.id,name:project.name,sourceFile:project.fileName||'',provider:'google-agent-hooks',status:'queued',stage:'preparing',detail:'Đang tạo môi trường xử lý',createdAt,updatedAt:createdAt,events:[]};
   await writeAgentRun(run,{addToIndex:true});
-  const interactionTemplate={agent,input:[{type:'text',text:runPrompt(project,runId)}],tools:[{type:'code_execution'}],environment:environment(req,project,runId),agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:30000}};
+  const interactionTemplate={agent,input:[{type:'text',text:runPrompt(project,runId)}],tools:[{type:'code_execution'}],environment:environment(req,project,runId),agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:10000}};
   let trigger;
   try{trigger=await geminiPlatform('/triggers',{method:'POST',body:JSON.stringify({display_name:`StoryForge · ${project.name}`.slice(0,64),schedule:resumeSchedule(),time_zone:'UTC',max_consecutive_failures:3,execution_timeout_seconds:600,interaction:interactionTemplate})})}
   catch(error){await writeAgentRun({...run,status:'failed',stage:'failed',detail:'Không thể tạo phiên Google Agent',error:error.message,updatedAt:now()});throw error}

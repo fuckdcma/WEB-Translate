@@ -9,6 +9,7 @@ function authorized(req){
 function describe(body){
   const call=body?.tool_call||{};const args=JSON.stringify(call.args||{});const error=body?.error;
   if(error)return {stage:'failed',status:'failed',detail:String(error).slice(0,220)};
+  if(/run-agent-pipeline/.test(args))return {stage:'checkpointed',detail:'Đã hoàn thành một lượt xử lý và lưu checkpoint'};
   if(/pnpm install/.test(args))return {stage:'installing',detail:'Đã chuẩn bị bộ xử lý'};
   if(/coordinate-project/.test(args))return {stage:'coordinating',detail:'Đã chia và phân công tác vụ'};
   if(/analyze-project/.test(args))return {stage:'analyzing',detail:'Đã phân loại nội dung và thuật ngữ'};
