@@ -3,12 +3,12 @@ import {allowMethods,listDatasetFiles,readDatasetJson,readProjects,readProjectSt
 const step=(id,label,status,detail)=>({id,label,status,detail});
 const when=value=>{const parsed=Date.parse(value||'');return Number.isFinite(parsed)?parsed:0};
 const taskIdFromPath=path=>path.split('/').pop()?.replace(/\.json$/i,'')||'';
-function nextAutomaticCheck(notBefore=Date.now()){const date=new Date(Math.max(Date.now(),Number(notBefore)||0));const minute=date.getUTCMinutes();date.setUTCSeconds(0,0);date.setUTCMinutes(minute<7?7:minute<37?37:67);return date.toISOString()}
+function nextAutomaticCheck(notBefore=Date.now()){const date=new Date(Math.max(Date.now(),Number(notBefore)||0));date.setUTCSeconds(0,0);date.setUTCMinutes(Math.ceil(date.getUTCMinutes()/10)*10);return date.toISOString()}
 function etaFor({totalRows,processedRows,analysisComplete,review,quota}){
-  const analysisRequests=analysisComplete?0:Math.ceil(totalRows/800);
-  const translationRequests=Math.ceil(Math.max(0,totalRows-processedRows)/700);
+  const analysisRequests=analysisComplete?0:Math.ceil(totalRows/400);
+  const translationRequests=Math.ceil(Math.max(0,totalRows-processedRows)/1_000);
   const reviewRows=Math.max(0,totalRows-Number(review?.checkedRows||0));
-  const reviewRequests=Math.ceil(reviewRows/400);
+  const reviewRequests=Math.ceil(reviewRows/500);
   const requests=analysisRequests+translationRequests+reviewRequests;
   const activeMinutes=Math.max(1,requests);
   const dailyLimit=Number(quota?.quota?.requestsPerDay)||0;
@@ -55,8 +55,9 @@ export default async function handler(req,res){
     for(const record of partialRecords){const task=taskById.get(record.taskId);if(!task||record.sourceHash!==manifest?.sourceHash)continue;const translated=new Set((record.translations||[]).filter(item=>String(item.translation||'').trim()).map(item=>Number(item.index)));const count=task.rowIndexes.filter(index=>translated.has(index)).length;partialRows+=count;const index=workers?task.sequence%workers:0;if(persistedByWorker[index])persistedByWorker[index].processedRows+=count}
     const summary={pending:0,running:0,completed:0,paused:0,failed:0};
     for(const worker of activeWorkers){const status=worker?.status||'pending';if(status in summary)summary[status]+=1;else summary.pending+=1}
-    let completedTasks=modern?persistedTasks.length:activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.completedTasks)||0),0);
-    let processedRows=modern?persistedTasks.reduce((total,item)=>total+Math.max(0,Number(item.rowCount)||0),partialRows):activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.processedRows)||0),0);
+    const liveCompletedTasks=activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.completedTasks)||0),0);const liveProcessedRows=activeWorkers.reduce((total,item)=>total+Math.max(0,Number(item?.processedRows)||0),0);
+    let completedTasks=modern?Math.max(persistedTasks.length,liveCompletedTasks):liveCompletedTasks;
+    let processedRows=modern?Math.max(persistedTasks.reduce((total,item)=>total+Math.max(0,Number(item.rowCount)||0),partialRows),liveProcessedRows):liveProcessedRows;
     processedRows=Math.min(Number(project.totalRows)||0,Math.max(processedRows,Number(manual?.translatedRows)||0));
     const totalTasks=modern?manifestTasks.length:Number(currentCoordinator?.totalTasks)||0;
     const translationComplete=modern?totalTasks>0&&completedTasks>=totalTasks:workers>0&&summary.completed===workers;
@@ -78,7 +79,7 @@ export default async function handler(req,res){
     const reviewPercent=isComplete?100:Math.max(0,Math.min(100,Number(currentReview?.progress)||0));
     const progress=isComplete?100:translationComplete?Math.min(99,90+Math.round(reviewPercent*.09)):translationPercent;
     const state=isComplete?'done':hasFailure?'failed':hasPause?'paused':'working';
-    const retryAfter=Math.max(Date.now(),when(dispatch?.queuedAt)+20*60_000,when(automation?.lastAttemptAt)+20*60_000);
+    const retryAfter=Math.max(Date.now(),when(dispatch?.queuedAt)+8*60_000,when(automation?.lastAttemptAt)+8*60_000);
     const storedNext=when(automation?.nextAttemptAt)>retryAfter?automation.nextAttemptAt:null;
     const autoResume={enabled:true,status:automation?.status||'scheduled',nextAttemptAt:storedNext||(!isComplete&&hasPause?nextAutomaticCheck(retryAfter):null),lastAttemptAt:automation?.lastAttemptAt||null,message:automation?.message||'Hệ thống tự kiểm tra và tiếp tục, không cần bấm nút.'};
     const currentStage=isComplete?'Hoàn thành':hasFailure?'Đang tự lưu lỗi và chờ thử lại':analysisState==='running'?`Đang phân loại và tạo glossary · ${Number(currentAnalysis?.processedRows||0).toLocaleString('vi-VN')}/${totalRows.toLocaleString('vi-VN')}`:hasPause?`Đã lưu ${processedRows.toLocaleString('vi-VN')}/${totalRows.toLocaleString('vi-VN')} dòng - queue sẽ tự tiếp tục`:reviewState==='running'?'Đang kiểm tra theo glossary':translationComplete?'Đang chờ kiểm tra cuối':modern&&summary.running+summary.completed>0?'Đang dịch lô token':currentCoordinator?'Queue đã sẵn sàng':'Đang khởi tạo queue';
@@ -86,7 +87,7 @@ export default async function handler(req,res){
     const categoryDetail=categories?`Menu ${Number(categories.menu)||0} · Tương tác ${Number(categories.interaction)||0} · Cốt truyện ${Number(categories.story)||0}`:'';
     const responseWorkers=archivedComplete?1:workers;
     const responseSummary=archivedComplete?{pending:0,running:0,completed:1,paused:0,failed:0}:summary;
-    const responseItems=archivedComplete?[{index:0,status:'completed',progress:100,processedRows:totalRows,completedTasks:totalTasks||1,totalTasks:totalTasks||1,restored:true}]:activeWorkers.map((item,index)=>({...persistedByWorker[index],index,status:item?.status||'pending',...item,completedTasks:persistedByWorker[index]?.completedTasks||Number(item?.completedTasks)||0,processedRows:persistedByWorker[index]?.processedRows||Number(item?.processedRows)||0,totalTasks:persistedByWorker[index]?.totalTasks||Number(item?.totalTasks)||0,totalRows:persistedByWorker[index]?.totalRows||Number(item?.totalRows)||0}));
+    const responseItems=archivedComplete?[{index:0,status:'completed',progress:100,processedRows:totalRows,completedTasks:totalTasks||1,totalTasks:totalTasks||1,restored:true}]:activeWorkers.map((item,index)=>({...persistedByWorker[index],index,status:item?.status||'pending',...item,completedTasks:Math.max(Number(persistedByWorker[index]?.completedTasks)||0,Number(item?.completedTasks)||0),processedRows:Math.max(Number(persistedByWorker[index]?.processedRows)||0,Number(item?.processedRows)||0),totalTasks:Math.max(Number(persistedByWorker[index]?.totalTasks)||0,Number(item?.totalTasks)||0),totalRows:Math.max(Number(persistedByWorker[index]?.totalRows)||0,Number(item?.totalRows)||0)}));
     const estimate=etaFor({totalRows,processedRows,analysisComplete,review:effectiveReview,quota});
     const steps=[
       step('validate','Kiểm tra tệp',isComplete||created?.fileValidated?'complete':'active',isComplete||created?.fileValidated?'Định dạng tệp hợp lệ':'Đang kiểm tra'),
