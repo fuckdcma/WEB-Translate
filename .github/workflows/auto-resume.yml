@@ -2,7 +2,7 @@ name: Auto resume translations
 
 on:
   schedule:
-    - cron: "7,37 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:

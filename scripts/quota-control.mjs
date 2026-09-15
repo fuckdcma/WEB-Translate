@@ -50,32 +50,38 @@ export class QuotaRouter{
   constructor(config,primary){this.config=config||{};this.models=[primary,...(this.config.fallbacks||[])].filter((item,index,list)=>item&&list.indexOf(item)===index);this.gates=new Map();this.extraFiles=[]}
   limitsFor(model){return usableLimits(this.config.limits?.[model]||{})}
   batchTokenBudget(){const limits=this.limitsFor(this.models[0]);return Math.max(500,Math.min(24_000,Math.floor(limits.usableTpm*.45)))}
+  batchRowLimit(){return Math.floor(clamp(this.config.batchRows||50,10,50))}
   async gate(model){if(this.gates.has(model))return this.gates.get(model);const day=pacificDay(Date.now());const [ledger,detected]=await Promise.all([readJson(`usage/google/${day}/${safeName(model)}.json`),readJson(`usage/google/limits/${safeName(model)}.json`)]);const saved=this.config.limits?.[model]||{};const profile={rpm:saved.rpm||detected?.rpm,tpm:saved.tpm||detected?.tpm,rpd:saved.rpd||detected?.rpd,reservePercent:saved.reservePercent||20,source:saved.source||detected?.source};const gate=new QuotaGate(model,profile,ledger);gate.refreshDay();this.gates.set(model,gate);return gate}
   files(){return[...this.gates.values()].filter(gate=>gate.dirty).map(gate=>gate.file()).concat(this.extraFiles)}
   async generate({prompt,temperature=.1,label='Google AI'}){
-    let lastError;
-    for(const model of this.models){
-      const gate=await this.gate(model);
-      try{
-        gate.ensureDaily();
-        const inputTokens=await countGoogleTokens({prompt,model});
-        await gate.reserve(inputTokens);
-        // Persist the reservation before generation so a terminated runner cannot
-        // forget an in-flight request and accidentally reuse the same quota.
-        await uploadWithRetry([gate.file()]);
-        gate.dirty=false;
-        const response=await requestGoogle({prompt,temperature,label,model,attemptLimit:1});
-        gate.complete(response.usage);
-        return{...response,model,inputTokens,quota:gate.limits};
-      }catch(error){
-        lastError=error;
-        error.model=model;
-        if(error instanceof GooglePauseError&&error.status===429&&error.quota){const detected={model,rpm:Number(error.quota.requestsPerMinute)||null,tpm:Number(error.quota.tokensPerMinute)||null,rpd:Number(error.quota.requestsPerDay)||null,tokenPerDay:Number(error.quota.tokenPerDay)||null,source:'google_error',updatedAt:new Date().toISOString()};this.extraFiles=[jsonFile(`usage/google/limits/${safeName(model)}.json`,detected)]}
-        if(error instanceof GooglePauseError&&['daily_quota','rate_limit'].includes(error.reason)){const files=this.files();if(files.length)await uploadWithRetry(files);continue}
-        throw error;
+    let lastError;const startedAt=Date.now();const waitBudget=Math.floor(clamp(this.config.automaticWaitMinutes||12,1,25))*60_000;
+    while(true){
+      let mayRetry=false;
+      for(const model of this.models){
+        const gate=await this.gate(model);
+        try{
+          gate.ensureDaily();
+          const inputTokens=await countGoogleTokens({prompt,model});
+          await gate.reserve(inputTokens);
+          // Persist the reservation before generation so a terminated runner cannot
+          // forget an in-flight request and accidentally reuse the same quota.
+          await uploadWithRetry([gate.file()]);
+          gate.dirty=false;
+          const response=await requestGoogle({prompt,temperature,label,model,attemptLimit:1});
+          gate.complete(response.usage);
+          return{...response,model,inputTokens,quota:gate.limits};
+        }catch(error){
+          lastError=error;
+          error.model=model;
+          if(error instanceof GooglePauseError&&error.status===429&&error.quota){const detected={model,rpm:Number(error.quota.requestsPerMinute)||null,tpm:Number(error.quota.tokensPerMinute)||null,rpd:Number(error.quota.requestsPerDay)||null,tokenPerDay:Number(error.quota.tokenPerDay)||null,source:'google_error',updatedAt:new Date().toISOString()};this.extraFiles=[jsonFile(`usage/google/limits/${safeName(model)}.json`,detected)]}
+          if(error instanceof GooglePauseError&&['rate_limit','service_busy','network'].includes(error.reason)){mayRetry=true;const files=this.files();if(files.length)await uploadWithRetry(files);continue}
+          if(error instanceof GooglePauseError&&error.reason==='daily_quota'){const files=this.files();if(files.length)await uploadWithRetry(files);continue}
+          throw error;
+        }
       }
+      if(!mayRetry||Date.now()-startedAt>=waitBudget)throw lastError||new GooglePauseError('Không còn model dự phòng có quota khả dụng.',{reason:'daily_quota'});
+      const wait=Math.min(65_000,Math.max(1_000,waitBudget-(Date.now()-startedAt)));console.log(`${label}: Google đang bận, tự chờ ${Math.ceil(wait/1000)} giây rồi thử lại`);await sleep(wait);
     }
-    throw lastError||new GooglePauseError('Không còn model dự phòng có quota khả dụng.',{reason:'daily_quota'});
   }
 }
 
