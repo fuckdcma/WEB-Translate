@@ -22,7 +22,8 @@ function runPrompt(project,runId){
 }
 
 function hookConfig(origin,runId,projectId){
-  return JSON.stringify({'storyforge-progress':{enabled:true,post_tool_execution:[{matcher:'code_execution|read_file|write_file',hooks:[{type:'http',url:`${origin}/api/agent-hook`,headers:{'X-Agent-Run':runId,'X-Project-Id':projectId},timeout:10}]}]}},null,2);
+  const headers={'X-Agent-Run':runId,'X-Project-Id':projectId};
+  return JSON.stringify({'storyforge-runner':{enabled:true,pre_tool_execution:[{matcher:'read_file|write_file|list_files|delete_file',hooks:[{type:'http',url:`${origin}/api/agent-hook?mode=guard`,headers,timeout:10}]}],post_tool_execution:[{matcher:'code_execution',hooks:[{type:'http',url:`${origin}/api/agent-hook`,headers,timeout:10}]}]}},null,2);
 }
 
 function environment(req,project,runId){
@@ -116,7 +117,7 @@ export default async function handler(req,res){
   if(!allowMethods(req,res,['GET','POST']))return;
   try{
     if(req.method==='GET'){
-      const stored=await readAgentRuns(req.query?.limit||12);
+      const stored=(await readAgentRuns(req.query?.limit||12)).filter(item=>!item.probe&&!(item.status==='cancelled'&&item.warning)&&!(item.status==='completed'&&!item.triggerId&&!item.interactionId));
       const runs=[];for(const item of stored)runs.push(await refresh(item));
       return send(res,200,{runs});
     }
