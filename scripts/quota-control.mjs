@@ -26,11 +26,13 @@ export function compactBatches(items,{tokenBudget=8_000,maxRows=1_000,serialize=
   if(batch.length)batches.push(batch);return batches;
 }
 
-export function tokenBatchPlan(items,{tokenBudget=8_000,serialize=item=>String(item)}={}){
-  if(!items.length)return{batches:[],totalTokens:0,batchCount:0,tokenBudget:Math.max(1,Math.floor(tokenBudget))};
-  const budget=Math.max(1,Math.floor(tokenBudget));const sizes=items.map(item=>estimatedTokens(serialize(item)));const totalTokens=sizes.reduce((sum,size)=>sum+size,0);const requestedBatches=Math.max(1,Math.ceil(totalTokens/budget));const batches=[];let batch=[];let batchTokens=0;let cumulative=0;
-  for(let index=0;index<items.length;index+=1){const size=sizes[index];const threshold=totalTokens*(batches.length+1)/requestedBatches;if(batch.length&&(batchTokens+size>budget||(batches.length<requestedBatches-1&&cumulative+size>threshold))){batches.push(batch);batch=[];batchTokens=0}batch.push(items[index]);batchTokens+=size;cumulative+=size}
-  if(batch.length)batches.push(batch);return{batches,totalTokens,batchCount:batches.length,tokenBudget:budget};
+export function tokenBatchPlan(items,{tokenBudget=8_000,outputTokenBudget=Number.POSITIVE_INFINITY,maxRows=Number.POSITIVE_INFINITY,serialize=item=>String(item),estimateOutputTokens=()=>0}={}){
+  const budget=Math.max(1,Math.floor(tokenBudget));const outputBudget=Math.max(1,Math.floor(outputTokenBudget));const rowLimit=Math.max(1,Math.floor(maxRows));
+  if(!items.length)return{batches:[],totalTokens:0,totalOutputTokens:0,batchCount:0,tokenBudget:budget,outputTokenBudget:outputBudget};
+  const sizes=items.map(item=>estimatedTokens(serialize(item)));const outputSizes=items.map(item=>Math.max(0,Math.ceil(Number(estimateOutputTokens(item))||0)));const totalTokens=sizes.reduce((sum,size)=>sum+size,0);const totalOutputTokens=outputSizes.reduce((sum,size)=>sum+size,0);
+  const requestedBatches=Math.max(1,Math.ceil(totalTokens/budget),Math.ceil(totalOutputTokens/outputBudget),Math.ceil(items.length/rowLimit));const batches=[];let batch=[];let batchTokens=0;let batchOutputTokens=0;let cumulative=0;
+  for(let index=0;index<items.length;index+=1){const size=sizes[index],outputSize=outputSizes[index];const threshold=totalTokens*(batches.length+1)/requestedBatches;if(batch.length&&(batch.length>=rowLimit||batchTokens+size>budget||batchOutputTokens+outputSize>outputBudget||(batches.length<requestedBatches-1&&cumulative+size>threshold))){batches.push(batch);batch=[];batchTokens=0;batchOutputTokens=0}batch.push(items[index]);batchTokens+=size;batchOutputTokens+=outputSize;cumulative+=size}
+  if(batch.length)batches.push(batch);return{batches,totalTokens,totalOutputTokens,batchCount:batches.length,tokenBudget:budget,outputTokenBudget:outputBudget};
 }
 
 class QuotaGate{
@@ -58,12 +60,13 @@ export class QuotaRouter{
   limitsFor(model){return usableLimits(this.config.limits?.[model]||{})}
   batchTokenBudget(){const limits=this.limitsFor(this.models[0]);return Math.max(500,limits.usableTpm)}
   batchRowLimit(defaultRows=1_000){return Math.floor(clamp(this.config.batchRows||defaultRows,10,1_000))}
+  batchOutputTokenBudget(defaultTokens=24_000){return Math.floor(clamp(this.config.batchOutputTokens||defaultTokens,4_000,48_000))}
   async gate(model){if(this.gates.has(model))return this.gates.get(model);const day=pacificDay(Date.now());const [ledger,detected]=await Promise.all([readJson(`usage/google/${day}/${safeName(model)}.json`),readJson(`usage/google/limits/${safeName(model)}.json`)]);const saved=this.config.limits?.[model]||{};const profile={rpm:saved.rpm||detected?.rpm,tpm:saved.tpm||detected?.tpm,rpd:saved.rpd||detected?.rpd,reservePercent:saved.reservePercent||10,source:saved.source||detected?.source};const gate=new QuotaGate(model,profile,ledger);gate.refreshDay();this.gates.set(model,gate);return gate}
   files(){return[...this.gates.values()].filter(gate=>gate.dirty).map(gate=>gate.file()).concat(this.extraFiles)}
   async generate({prompt,temperature=.1,label='Google AI'}){
     let lastError;const startedAt=Date.now();const waitBudget=Math.floor(clamp(this.config.automaticWaitMinutes||12,1,25))*60_000;
     while(true){
-      let mayRetry=false;
+      let minuteLimitRetry=false;
       for(const model of this.models){
         const gate=await this.gate(model);
         try{
@@ -81,13 +84,14 @@ export class QuotaRouter{
           lastError=error;
           error.model=model;
           if(error instanceof GooglePauseError&&error.status===429&&error.quota){const detected={model,rpm:Number(error.quota.requestsPerMinute)||null,tpm:Number(error.quota.tokensPerMinute)||null,rpd:Number(error.quota.requestsPerDay)||null,tokenPerDay:Number(error.quota.tokenPerDay)||null,source:'google_error',updatedAt:new Date().toISOString()};this.extraFiles=[jsonFile(`usage/google/limits/${safeName(model)}.json`,detected)]}
-          if(error instanceof GooglePauseError&&['rate_limit','service_busy','network'].includes(error.reason)){mayRetry=true;const files=this.files();if(files.length)await uploadWithRetry(files);continue}
+          if(error instanceof GooglePauseError&&error.reason==='rate_limit'){minuteLimitRetry=true;const files=this.files();if(files.length)await uploadWithRetry(files);continue}
+          if(error instanceof GooglePauseError&&['service_busy','network'].includes(error.reason)){const files=this.files();if(files.length)await uploadWithRetry(files);continue}
           if(error instanceof GooglePauseError&&error.reason==='daily_quota'){const files=this.files();if(files.length)await uploadWithRetry(files);continue}
           throw error;
         }
       }
-      if(!mayRetry||Date.now()-startedAt>=waitBudget)throw lastError||new GooglePauseError('Không còn model dự phòng có quota khả dụng.',{reason:'daily_quota'});
-      const wait=Math.min(65_000,Math.max(1_000,waitBudget-(Date.now()-startedAt)));console.log(`${label}: Google đang bận, tự chờ ${Math.ceil(wait/1000)} giây rồi thử lại`);await sleep(wait);
+      if(!minuteLimitRetry||Date.now()-startedAt>=waitBudget)throw lastError||new GooglePauseError('Không còn model dự phòng có quota khả dụng.',{reason:'daily_quota'});
+      const wait=Math.min(65_000,Math.max(1_000,waitBudget-(Date.now()-startedAt)));console.log(`${label}: đã chạm giới hạn trong phút, tự chờ ${Math.ceil(wait/1000)} giây rồi thử lại`);await sleep(wait);
     }
   }
 }

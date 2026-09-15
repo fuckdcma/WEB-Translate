@@ -14,6 +14,24 @@ export class GooglePauseError extends Error{
   }
 }
 
+export class GoogleResponseError extends Error{
+  constructor(message,{reason='invalid_response',finishReason='',responseChars=0}={}){
+    super(message);
+    this.name='GoogleResponseError';
+    this.reason=reason;
+    this.finishReason=finishReason;
+    this.responseChars=responseChars;
+  }
+}
+
+export function assertCompleteGooglePayload(payload,label='Google AI'){
+  const candidate=payload?.candidates?.[0];
+  const finishReason=String(candidate?.finishReason||'');
+  const responseChars=String(candidate?.content?.parts?.[0]?.text||'').length;
+  if(finishReason==='MAX_TOKENS')throw new GoogleResponseError(`${label}: câu trả lời bị cắt vì vượt giới hạn đầu ra; hệ thống sẽ chia lô nhỏ hơn.`,{reason:'output_limit',finishReason,responseChars});
+  if(finishReason&&finishReason!=='STOP')throw new GoogleResponseError(`${label}: Google dừng phản hồi với lý do ${finishReason}. Tiến độ đã được lưu.`,{reason:'invalid_response',finishReason,responseChars});
+}
+
 function isDailyQuota(detail){return /daily|per[ _-]?day|requests?[ _-]?per[ _-]?day|\brpd\b|GenerateRequestsPerDay/i.test(detail)}
 export function quotaInfo(detail){try{const payload=typeof detail==='string'?JSON.parse(detail):detail;const entries=(payload?.error?.details||[]).flatMap(item=>item.violations||[]);const result={};for(const item of entries){const text=`${item.quotaMetric||''} ${item.quotaId||''} ${item.description||''}`;const value=Number(item.quotaValue||String(item.description||'').match(/(?:limit|quota)[^\d]*(\d[\d,]*)/i)?.[1]?.replace(/,/g,''));if(!Number.isFinite(value))continue;if(/token.*day|TokensPerDay|\bTPD\b/i.test(text))result.tokenPerDay=value;else if(/request.*day|RequestsPerDay|\bRPD\b/i.test(text))result.requestsPerDay=value;else if(/token.*minute|TokensPerMinute|\bTPM\b/i.test(text))result.tokensPerMinute=value;else if(/request.*minute|RequestsPerMinute|\bRPM\b/i.test(text))result.requestsPerMinute=value}return Object.keys(result).length?result:null}catch{return null}}
 function usageInfo(payload){const usage=payload?.usageMetadata||{};return{inputTokens:Number(usage.promptTokenCount)||0,outputTokens:(Number(usage.candidatesTokenCount)||0)+(Number(usage.thoughtsTokenCount)||0),totalTokens:Number(usage.totalTokenCount)||0,requests:1}}
@@ -32,14 +50,14 @@ export async function countGoogleTokens({prompt,model=process.env.GEMINI_MODEL||
   throw new GooglePauseError(`Không thể kiểm tra token cho ${model}. Tiến độ đã được lưu.`,{reason:response.status===429?'rate_limit':'token_count',status:response.status,quota:quotaInfo(detail)});
 }
 
-export async function requestGoogle({prompt,temperature=0.1,label='Google AI',model=process.env.GEMINI_MODEL||'gemini-3.6-flash',attemptLimit=configuredMaxAttempts,beforeAttempt=null}){
+export async function requestGoogle({prompt,temperature=0.1,label='Google AI',model=process.env.GEMINI_MODEL||'gemini-3.6-flash',attemptLimit=configuredMaxAttempts,beforeAttempt=null,maxOutputTokens=32_768}){
   const googleUrl=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const maxAttempts=Math.min(configuredMaxAttempts,Math.max(1,Number(attemptLimit)||1));
   for(let attempt=1;attempt<=maxAttempts;attempt+=1){
     if(beforeAttempt)await beforeAttempt(attempt);
     let response;
     try{
-      response=await fetch(googleUrl,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':process.env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{candidateCount:1,responseMimeType:'application/json',temperature,maxOutputTokens:65_536}}),signal:AbortSignal.timeout(300_000)});
+      response=await fetch(googleUrl,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':process.env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{candidateCount:1,responseMimeType:'application/json',temperature,maxOutputTokens}}),signal:AbortSignal.timeout(300_000)});
     }catch(error){
       if(attempt===maxAttempts)throw new GooglePauseError(`${label} tạm thời mất kết nối. Tiến độ đã được lưu.`,{reason:'network',attempts:attempt});
       const delay=retryDelay(null,attempt);

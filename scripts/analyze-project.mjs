@@ -1,4 +1,4 @@
-import {GooglePauseError} from './google-api.mjs';
+import {assertCompleteGooglePayload,GooglePauseError,GoogleResponseError} from './google-api.mjs';
 import {appendFile} from 'node:fs/promises';
 import {jsonFile,listPaths,readJson,readText,StoragePauseError,uploadWithRetry} from './hf-pipeline.mjs';
 import {createQuotaRouter,tokenBatchPlan} from './quota-control.mjs';
@@ -10,7 +10,9 @@ const projectId=process.env.PROJECT_ID;const runId=process.env.RUN_ID;const stat
 const statusFile=(status,extra={})=>jsonFile(statusPath,{runId,status,updatedAt:new Date().toISOString(),...extra});
 const setReady=async value=>{if(process.env.GITHUB_OUTPUT)await appendFile(process.env.GITHUB_OUTPUT,`ready=${value?'true':'false'}\n`)};
 const normalizedCategory=value=>/menu/i.test(value)?'menu':/interact/i.test(value)?'interaction':'story';
-function parsedArray(payload){const raw=String(payload?.candidates?.[0]?.content?.parts?.[0]?.text||'');const start=raw.indexOf('[');const end=raw.lastIndexOf(']');if(start<0||end<start)throw new Error('Google AI did not return an analysis array');const value=JSON.parse(raw.slice(start,end+1));if(!Array.isArray(value))throw new Error('Google AI analysis is not an array');return value}
+function parsedArray(payload){assertCompleteGooglePayload(payload,'Google AI classification and terms');const raw=String(payload?.candidates?.[0]?.content?.parts?.[0]?.text||'');const start=raw.indexOf('[');const end=raw.lastIndexOf(']');if(start<0||end<start)throw new GoogleResponseError('Google AI classification and terms trả về dữ liệu không hoàn chỉnh. Tiến độ đã được lưu.',{responseChars:raw.length});try{const value=JSON.parse(raw.slice(start,end+1));if(!Array.isArray(value))throw new Error('not an array');return value}catch{throw new GoogleResponseError('Google AI classification and terms trả về JSON không hợp lệ. Tiến độ đã được lưu.',{responseChars:raw.length})}}
+const analysisPlan=(items,router)=>tokenBatchPlan(items,{tokenBudget:router.batchTokenBudget(),outputTokenBudget:router.batchOutputTokenBudget(),maxRows:router.batchRowLimit(600),serialize:item=>`${item.id}\t${item.text}`,estimateOutputTokens:()=>48});
+const canSplit=error=>['batch_too_large','output_limit'].includes(error?.reason);
 async function readMany(paths){const values=[];for(let offset=0;offset<paths.length;offset+=12)values.push(...await Promise.all(paths.slice(offset,offset+12).map(path=>readJson(path))));return values}
 
 async function main(){
@@ -21,23 +23,23 @@ async function main(){
     const config=manifest.googleConfig||await readJson('config/google-ai.json')||{model:googleModel};const router=await createQuotaRouter({config,primary:googleModel});
     const paths=await listPaths(`checkpoints/${projectId}/analysis/`);const records=await readMany(paths);const entries=new Map();
     for(const record of records)if(record?.sourceHash===manifest.sourceHash)for(const item of record.entries||[])if(Number(item.id)>0)entries.set(Number(item.id),item);
-    let pending=items.filter(item=>!entries.has(item.id));let queue=tokenBatchPlan(pending,{tokenBudget:router.batchTokenBudget(),serialize:item=>`${item.id}\t${item.text}`}).batches;
-    await uploadWithRetry([statusFile('running',{model:googleModel,processedRows:entries.size,totalRows:items.length,batches:queue.length,message:'Đang phân loại và tạo thuật ngữ cố định'})]);
+    let pending=items.filter(item=>!entries.has(item.id));const plan=analysisPlan(pending,router);let queue=[...plan.batches];
+    await uploadWithRetry([statusFile('running',{model:googleModel,processedRows:entries.size,totalRows:items.length,batches:queue.length,pendingInputTokens:plan.totalTokens,estimatedOutputTokens:plan.totalOutputTokens,inputTokenBudget:plan.tokenBudget,outputTokenBudget:plan.outputTokenBudget,message:`Đã chia phân tích thành ${plan.batchCount} lô an toàn theo cả đầu vào và đầu ra`})]);
     while(queue.length){
       const batch=queue.shift();const compact=batch.map(item=>`${item.id}\t${item.text.replace(/[\r\n\t]+/g,' ')}`).join('\n');
       const prompt=`Analyze these game localization strings before translation from ${project.sourceLanguage} to ${project.targetLanguage}. Input is compact TSV: ID<TAB>ENG. Classify each row as MENU, INTERACTION, or STORY. Extract only reusable terms, proper names, locations, item names, or UI phrases that should stay consistent. Propose a concise Vietnamese target for each extracted term. Do not translate the full sentence.
-Return JSON only: [{"id":1,"category":"MENU","terms":[{"source":"COLLECTION","target":"BỘ SƯU TẬP","type":"ui"}]}]. Return every ID exactly once. No Markdown.
+Return JSON only: [{"id":1,"category":"MENU","terms":[{"source":"COLLECTION","target":"BỘ SƯU TẬP","type":"ui"}]}]. Return every ID exactly once. Extract at most 3 truly reusable terms per row; use an empty terms array when none exists. No Markdown.
 
 ID\tENG
 ${compact}`;
       try{
         const response=await router.generate({prompt,temperature:.05,label:'Google AI classification and terms'});const parsed=parsedArray(response.payload);const ids=new Set(batch.map(item=>item.id));let accepted=0;
-        const batchEntries=[];for(const item of parsed){const id=Number(item.id);if(!ids.has(id))continue;const entry={id,category:normalizedCategory(item.category),terms:(Array.isArray(item.terms)?item.terms:[]).map(term=>typeof term==='string'?{source:term,target:'',type:'term'}:{source:String(term?.source||''),target:String(term?.target||''),type:String(term?.type||'term')}).filter(term=>term.source.trim()).slice(0,8)};entries.set(id,entry);batchEntries.push(entry);accepted+=1}
+        const batchEntries=[];for(const item of parsed){const id=Number(item.id);if(!ids.has(id))continue;const entry={id,category:normalizedCategory(item.category),terms:(Array.isArray(item.terms)?item.terms:[]).map(term=>typeof term==='string'?{source:term,target:'',type:'term'}:{source:String(term?.source||''),target:String(term?.target||''),type:String(term?.type||'term')}).filter(term=>term.source.trim()).slice(0,3)};entries.set(id,entry);batchEntries.push(entry);accepted+=1}
         if(!accepted)throw new Error('Google AI returned no valid analysis rows');
         const complete=accepted===batch.length;const name=`analysis-${String(batch[0].id).padStart(6,'0')}-${String(batch.at(-1).id).padStart(6,'0')}.json`;await uploadWithRetry([jsonFile(`checkpoints/${projectId}/analysis/${name}`,{version:1,projectId,runId,sourceHash:manifest.sourceHash,model:response.model,entries:batchEntries,complete,updatedAt:new Date().toISOString()}),...router.files(),statusFile('running',{model:response.model,processedRows:entries.size,totalRows:items.length,message:`Đã phân loại ${entries.size}/${items.length} dòng`})]);
-        const missing=batch.filter(item=>!entries.has(item.id));if(missing.length)queue.unshift(...tokenBatchPlan(missing,{tokenBudget:router.batchTokenBudget(),serialize:item=>`${item.id}\t${item.text}`}).batches);
+        const missing=batch.filter(item=>!entries.has(item.id));if(missing.length)queue.unshift(...analysisPlan(missing,router).batches);
       }catch(error){
-        if(batch.length>10&&(!(error instanceof GooglePauseError)||error.reason==='batch_too_large')){const middle=Math.ceil(batch.length/2);console.warn(`Analysis batch ${batch.length} rows was not accepted; retrying as ${middle} + ${batch.length-middle}.`);queue.unshift(batch.slice(middle),batch.slice(0,middle));continue}
+        if(batch.length>10&&canSplit(error)){const middle=Math.ceil(batch.length/2);console.warn(`Analysis batch ${batch.length} rows exceeded ${error.reason==='output_limit'?'the response limit':'the input limit'}; retrying as ${middle} + ${batch.length-middle}.`);queue.unshift(batch.slice(middle),batch.slice(0,middle));continue}
         const pausedAt=new Date().toISOString();await uploadWithRetry([...router.files(),statusFile('paused',{model:error.model||googleModel,processedRows:entries.size,totalRows:items.length,pauseReason:error.reason||'invalid_response',message:error.message,pausedAt}),...(error.quota?[jsonFile(`status/${projectId}/quota.json`,{runId,model:error.model||googleModel,reason:error.reason||'rate_limit',quota:error.quota,message:error.message,pausedAt,stage:'analysis'})]:[])]);await setReady(false);console.warn(error.message);return;
       }
     }
