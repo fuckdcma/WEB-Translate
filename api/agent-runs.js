@@ -5,6 +5,7 @@ const runnerModel='gemini-3.5-flash-lite';
 const terminalStates=new Set(['completed','failed','cancelled']);
 const validId=value=>/^[a-zA-Z0-9._-]+$/.test(String(value||''));
 const now=()=>new Date().toISOString();
+function resumeSchedule(){const start=(new Date().getUTCMinutes()+12)%60;return [0,15,30,45].map(offset=>(start+offset)%60).sort((a,b)=>a-b).join(',')+' * * * *'}
 
 function publicOrigin(req){
   const configured=process.env.PUBLIC_SITE_URL||process.env.VERCEL_PROJECT_PRODUCTION_URL;
@@ -87,14 +88,15 @@ async function createRun(req,project){
   const createdAt=now();
   let run={id:runId,projectId:project.id,name:project.name,sourceFile:project.fileName||'',provider:'google-agent-hooks',status:'queued',stage:'preparing',detail:'Đang tạo môi trường xử lý',createdAt,updatedAt:createdAt,events:[]};
   await writeAgentRun(run,{addToIndex:true});
+  const interactionTemplate={agent,input:[{type:'text',text:runPrompt(project,runId)}],tools:[{type:'code_execution'}],environment:environment(req,project,runId),agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:30000}};
   let trigger;
-  try{trigger=await geminiPlatform('/triggers',{method:'POST',body:JSON.stringify({display_name:`StoryForge · ${project.name}`.slice(0,64),schedule:'*/10 * * * *',time_zone:'UTC',max_consecutive_failures:3,execution_timeout_seconds:600,interaction:{agent,input:[{type:'text',text:runPrompt(project,runId)}],tools:[{type:'code_execution'}],environment:environment(req,project,runId),agent_config:{type:'antigravity',model:runnerModel,max_total_tokens:30000}}})})}
+  try{trigger=await geminiPlatform('/triggers',{method:'POST',body:JSON.stringify({display_name:`StoryForge · ${project.name}`.slice(0,64),schedule:resumeSchedule(),time_zone:'UTC',max_consecutive_failures:3,execution_timeout_seconds:600,interaction:interactionTemplate})})}
   catch(error){await writeAgentRun({...run,status:'failed',stage:'failed',detail:'Không thể tạo phiên Google Agent',error:error.message,updatedAt:now()});throw error}
   run={...run,triggerId:trigger.id||trigger.name,triggerStatus:trigger.status||'active',nextRunAt:trigger.next_run_time||trigger.nextRunTime,detail:'Đã xếp lịch · đang khởi động',updatedAt:now()};
   await writeAgentRun(run);
   try{
-    const execution=await geminiPlatform(`/triggers/${encodeURIComponent(run.triggerId)}/executions`,{method:'POST',body:'{}'});
-    run={...run,interactionId:execution.interaction_id||execution.interactionId,status:'in_progress',stage:'starting',detail:'Google Agent đang mở tệp dự án',updatedAt:now()};
+    const interaction=await geminiPlatform('/interactions',{method:'POST',body:JSON.stringify({...interactionTemplate,background:true})});
+    run={...run,interactionId:interaction.id,status:'in_progress',stage:'starting',detail:'Google Agent đang mở tệp dự án',updatedAt:now()};
   }catch(error){run={...run,detail:'Đã xếp lịch tự động · sẽ chạy ở lượt kế tiếp',warning:error.message,updatedAt:now()}}
   await writeAgentRun(run);
   return run;
